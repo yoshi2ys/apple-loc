@@ -8,6 +8,15 @@ struct JSONDataParser {
     let allowedPlatforms: Set<String>?
     var filterIBKeys: Bool = true
 
+    private static let osDirectories: Set<String> = ["ios", "macos"]
+
+    /// Resolve the JSON data root directory (may be dir itself or dir/data).
+    static func resolveDataDir(_ dir: String) -> String {
+        let contents = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
+        if !osDirectories.isDisjoint(with: contents) { return dir }
+        return (dir as NSString).appendingPathComponent("data")
+    }
+
     // MARK: - Codable Models
 
     private struct JSONLocFile: Decodable {
@@ -33,7 +42,7 @@ struct JSONDataParser {
 
         // Iterate over os directories (ios, macos)
         let osDirs = try fm.contentsOfDirectory(atPath: dataDir)
-            .filter { $0 == "ios" || $0 == "macos" }
+            .filter { Self.osDirectories.contains($0) }
             .sorted()
 
         for osName in osDirs {

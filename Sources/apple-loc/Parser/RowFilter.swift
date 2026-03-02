@@ -1,7 +1,6 @@
 import Foundation
 
 /// Shared filter logic for excluding low-value localization rows.
-/// Used by both SQLDumpParser and JSONDataParser.
 struct RowFilter: Sendable {
     var filterIBKeys: Bool = true
 

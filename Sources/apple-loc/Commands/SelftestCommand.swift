@@ -14,9 +14,6 @@ struct SelftestCommand: AsyncParsableCommand {
         try testVecIntegration()
         try testMultiLangVec()
         try testFuzzyLookup()
-        try testParser()
-        try testParserIBFilter()
-        try testParserExclusion()
         try testDedupPriority()
         try testEmbedding()
         try testParallelEmbedding()
@@ -28,7 +25,6 @@ struct SelftestCommand: AsyncParsableCommand {
         try testInternalFilter()
         try testJSONParser()
         try testPlatformConversion()
-        try testDataFormatDetection()
         try testStructuredTargetResolution()
         try testStructuredTargetOutput()
         print("All selftests PASSED")
@@ -214,125 +210,6 @@ struct SelftestCommand: AsyncParsableCommand {
             assert(ciSources.count == 3, "FAIL: case-insensitive fuzzy should find 3 results, got \(ciSources.count)")
         }
         print("[PASS] Fuzzy lookup (substring matching via LIKE)")
-    }
-
-    private func testParser() throws {
-        let tmpDir = "/tmp/apple-loc-parser-test"
-        try? FileManager.default.removeItem(atPath: tmpDir)
-        try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(atPath: tmpDir) }
-
-        let testData = """
-        CREATE TABLE ios26 (id integer NOT NULL);
-        COPY ios26 (id, group_id, source, target, language, file_name, bundle_name, bundle_path, platform) FROM stdin;
-        1\t1\tCamera\tカメラ\tja\tLocalizable.strings\tUIKit.framework\t/path\tiOS
-        2\t1\tCamera\tCamera\ten\tLocalizable.strings\tUIKit.framework\t/path\tiOS
-        3\t2\tSettings\t設定\tja\tLocalizable.strings\tPreferences.framework\t/path\tiOS
-        4\t2\tSettings\tEinstellungen\tde\tLocalizable.strings\tPreferences.framework\t/path\tiOS
-        \\.
-        """
-        let filePath = (tmpDir as NSString).appendingPathComponent("data.sql.aa")
-        try testData.write(toFile: filePath, atomically: true, encoding: .utf8)
-
-        var parser = SQLDumpParser(
-            dataDir: tmpDir,
-            allowedLanguages: ["ja", "en"],
-            allowedPlatforms: ["ios26"]
-        )
-        parser.filterIBKeys = false  // Don't filter IB keys in this basic test
-
-        var rows: [ParsedRow] = []
-        let count = try parser.parse { row in rows.append(row) }
-
-        assert(count == 3, "FAIL: parser expected 3 rows, got \(count)")
-        assert(rows[0].source == "Camera" && rows[0].target == "カメラ", "FAIL: row 0")
-        assert(rows[0].groupId == 1, "FAIL: row 0 groupId")
-        assert(rows[1].language == "en", "FAIL: row 1 language")
-        assert(rows[2].platform == "ios26", "FAIL: row 2 platform")
-        assert(!rows.contains(where: { $0.language == "de" }), "FAIL: de not filtered")
-        print("[PASS] SQL dump parser (\(count) rows)")
-    }
-
-    private func testParserIBFilter() throws {
-        let tmpDir = "/tmp/apple-loc-ib-test"
-        try? FileManager.default.removeItem(atPath: tmpDir)
-        try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(atPath: tmpDir) }
-
-        let testData = """
-        COPY ios26 (id, group_id, source, target, language, file_name, bundle_name, bundle_path, platform) FROM stdin;
-        1\t1\tCancel\tキャンセル\tja\tL.strings\tUIKit\t/p\tiOS
-        2\t2\tD1K-K5-gc3.title\tあ\tja\tMain.strings\tApp\t/p\tiOS
-        3\t3\t8PE-KZ-giS.text\tい\tja\tMain.strings\tApp\t/p\tiOS
-        4\t4\t22.title\tキャンセル\tja\tL.strings\tUIKit\t/p\tiOS
-        \\.
-        """
-        let filePath = (tmpDir as NSString).appendingPathComponent("data.sql.aa")
-        try testData.write(toFile: filePath, atomically: true, encoding: .utf8)
-
-        let parser = SQLDumpParser(
-            dataDir: tmpDir,
-            allowedLanguages: ["ja"],
-            allowedPlatforms: ["ios26"]
-        )
-
-        var rows: [ParsedRow] = []
-        let count = try parser.parse { row in rows.append(row) }
-
-        // Should keep Cancel and 22.title, filter out IB keys
-        assert(count == 2, "FAIL: IB filter expected 2 rows, got \(count)")
-        assert(rows[0].source == "Cancel", "FAIL: first row should be Cancel")
-        assert(rows[1].source == "22.title", "FAIL: second row should be 22.title (numeric keys kept)")
-        print("[PASS] IB key filter (\(count) rows kept, 2 IB keys filtered)")
-    }
-
-    private func testParserExclusion() throws {
-        let tmpDir = "/tmp/apple-loc-exclusion-test"
-        try? FileManager.default.removeItem(atPath: tmpDir)
-        try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(atPath: tmpDir) }
-
-        let testData = """
-        COPY macos26 (id, group_id, source, target, language, file_name, bundle_name, bundle_path, platform) FROM stdin;
-        1\t1\tCamera\tCamera\ten\tLocalizable.strings\tUIKit.framework\t/p\tmacOS
-        2\t2\tCFBundleName\tFinder\ten\tInfoPlist.strings\tFinder.app\t/p\tmacOS
-        3\t3\tNSHumanReadableCopyright\tCopyright\ten\tInfoPlist.strings\tApp.app\t/p\tmacOS
-        4\t4\tSettings\tSettings\ten\tInfoPlist.loctable\tSettings.app\t/p\tmacOS
-        5\t5\tOpen\tOpen\ten\tAppIntents.strings\tApp.app\t/p\tmacOS
-        6\t6\t%@\t%@\ten\tLocalizable.strings\tUIKit.framework\t/p\tmacOS
-        7\t7\t%d %@\t%d %@\ten\tLocalizable.strings\tUIKit.framework\t/p\tmacOS
-        8\t8\tDone\tDone\ten\tLocalizable.strings\tUIKit.framework\t/p\tmacOS
-        9\t9\tCFBundleDisplayName\tMaps\ten\tLocalizable.strings\tMaps.app\t/p\tmacOS
-        10\t10\tShortcuts\tShortcuts\ten\tAppShortcuts.strings\tApp.app\t/p\tmacOS
-        \\.
-        """
-        let filePath = (tmpDir as NSString).appendingPathComponent("data.sql.aa")
-        try testData.write(toFile: filePath, atomically: true, encoding: .utf8)
-
-        var parser = SQLDumpParser(
-            dataDir: tmpDir,
-            allowedLanguages: ["en"],
-            allowedPlatforms: ["macos26"]
-        )
-        parser.filterIBKeys = false
-
-        var rows: [ParsedRow] = []
-        let count = try parser.parse { row in rows.append(row) }
-
-        // Should keep: Camera, Done (2 rows)
-        // Should filter: CFBundleName (plist key), NSHumanReadableCopyright (plist key),
-        //   Settings from InfoPlist.loctable (excluded file), Open from AppIntents (excluded file),
-        //   %@ and %d %@ (format-only), CFBundleDisplayName (plist key),
-        //   Shortcuts from AppShortcuts (excluded file)
-        let sources = rows.map(\.source)
-        assert(count == 2, "FAIL: exclusion filter expected 2 rows, got \(count). Sources: \(sources)")
-        assert(sources.contains("Camera"), "FAIL: Camera should be kept")
-        assert(sources.contains("Done"), "FAIL: Done should be kept")
-        assert(!sources.contains("CFBundleName"), "FAIL: CFBundleName should be filtered")
-        assert(!sources.contains("NSHumanReadableCopyright"), "FAIL: plist copyright should be filtered")
-        assert(!sources.contains("Settings"), "FAIL: InfoPlist.loctable should be filtered")
-        assert(!sources.contains("%@"), "FAIL: format-only should be filtered")
-        print("[PASS] Parser exclusion filters (\(count) rows kept, 8 filtered)")
     }
 
     private func testDedupPriority() throws {
@@ -939,36 +816,6 @@ struct SelftestCommand: AsyncParsableCommand {
                "FAIL: macos/13.5.2 → macos13")
 
         print("[PASS] Platform name conversion")
-    }
-
-    private func testDataFormatDetection() throws {
-        let tmpBase = "/tmp/apple-loc-format-detect-test"
-        try? FileManager.default.removeItem(atPath: tmpBase)
-        defer { try? FileManager.default.removeItem(atPath: tmpBase) }
-
-        // Test SQL detection: directory with data.sql.* files
-        let sqlDir = (tmpBase as NSString).appendingPathComponent("sql")
-        try FileManager.default.createDirectory(atPath: sqlDir, withIntermediateDirectories: true)
-        try "".write(toFile: (sqlDir as NSString).appendingPathComponent("data.sql.aa"), atomically: true, encoding: .utf8)
-        assert(IngestCommand.DataFormat.detect(in: sqlDir) == .sql, "FAIL: should detect sql format")
-
-        // Test JSON detection: directory with ios/ subdirectory
-        let jsonDir = (tmpBase as NSString).appendingPathComponent("json")
-        try FileManager.default.createDirectory(
-            atPath: (jsonDir as NSString).appendingPathComponent("ios"),
-            withIntermediateDirectories: true
-        )
-        assert(IngestCommand.DataFormat.detect(in: jsonDir) == .json, "FAIL: should detect json format")
-
-        // Test JSON detection via data/ subdirectory
-        let parentDir = (tmpBase as NSString).appendingPathComponent("parent")
-        try FileManager.default.createDirectory(
-            atPath: ((parentDir as NSString).appendingPathComponent("data") as NSString).appendingPathComponent("macos"),
-            withIntermediateDirectories: true
-        )
-        assert(IngestCommand.DataFormat.detect(in: parentDir) == .json, "FAIL: should detect json via data/ subdir")
-
-        print("[PASS] Data format detection")
     }
 
     private func testStructuredTargetResolution() throws {
