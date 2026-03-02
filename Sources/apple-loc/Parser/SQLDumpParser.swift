@@ -1,9 +1,9 @@
 import Foundation
 
-/// A parsed row from the PostgreSQL COPY data.
+/// A parsed row from localization data (SQL dump or JSON).
 struct ParsedRow: Sendable {
-    let id: Int
-    let groupId: Int
+    let id: Int?
+    let groupId: Int?
     let source: String      // English original / key
     let target: String      // Translated text
     let language: String
@@ -19,21 +19,6 @@ struct SQLDumpParser {
     let allowedLanguages: Set<String>?  // nil = all languages
     let allowedPlatforms: Set<String>?  // nil = all platforms
     var filterIBKeys: Bool = true       // Skip Interface Builder object ID keys
-
-    /// Characters allowed in format-placeholder-only strings (e.g. "%@", "%d %@", "%1$@ %2$@")
-    private static let formatOnlyChars: Set<Character> = Set(" \t%@dlufegc0123456789$.*-+#")
-
-    /// Files to exclude (metadata / low-value)
-    private static let excludedFilePatterns: Set<String> = [
-        "infoplist.loctable", "infoplist.strings", "infoplist.xcstrings",
-    ]
-    private static let excludedFilePrefixes = ["appintents", "appshortcuts"]
-
-    /// Plist metadata keys to exclude
-    private static let plistMetadataKeys: Set<String> = [
-        "CFBundleName", "CFBundleDisplayName", "CFBundleGetInfoString",
-        "CFBundleShortVersionString", "NSHumanReadableCopyright",
-    ]
 
     /// Find and sort all data.sql.* files in the directory.
     func splitFiles() throws -> [String] {
@@ -56,6 +41,7 @@ struct SQLDumpParser {
     /// Returns total rows parsed (matching filter).
     func parse(handler: (ParsedRow) throws -> Void) throws -> Int {
         let files = try splitFiles()
+        let filter = RowFilter(filterIBKeys: filterIBKeys)
         var currentTable: String?   // e.g. "ios26" — acts as platform
         var inCopyData = false
         var totalParsed = 0
@@ -107,7 +93,7 @@ struct SQLDumpParser {
                         guard let table = currentTable else { continue }   // skipping this table
 
                         if let row = parseDataRow(line, platform: table),
-                           shouldInclude(row) {
+                           shouldInclude(row, filter: filter) {
                             try handler(row)
                             totalParsed += 1
                         }
@@ -122,7 +108,7 @@ struct SQLDumpParser {
                                 inCopyData = false
                             } else if let table = currentTable,
                                       let row = parseDataRow(line, platform: table),
-                                      shouldInclude(row) {
+                                      shouldInclude(row, filter: filter) {
                                 try handler(row)
                                 totalParsed += 1
                             }
@@ -173,56 +159,10 @@ struct SQLDumpParser {
         )
     }
 
-    /// Check if a file should be excluded (plist metadata, AppIntents, etc.).
-    private func isExcludedFile(_ fileName: String) -> Bool {
-        let lower = fileName.lowercased()
-        if Self.excludedFilePatterns.contains(lower) { return true }
-        return Self.excludedFilePrefixes.contains(where: { lower.hasPrefix($0) })
-    }
-
-    /// Check if the source key is a plist metadata key.
-    private func isPlistMetadataKey(_ source: String) -> Bool {
-        Self.plistMetadataKeys.contains(source)
-    }
-
-    /// Combined filter: language, IB keys, excluded files, plist metadata, format-only strings.
-    private func shouldInclude(_ row: ParsedRow) -> Bool {
+    /// Combined filter: language + shared RowFilter rules.
+    private func shouldInclude(_ row: ParsedRow, filter: RowFilter) -> Bool {
         (allowedLanguages?.matchesLanguage(row.language) ?? true)
-            && !isIBKey(row.source)
-            && !isExcludedFile(row.fileName)
-            && !isPlistMetadataKey(row.source)
-            && !isFormatOnlyString(row.source)
-    }
-
-    /// Check if the source text is only format placeholders (e.g. "%@", "%d %@").
-    private func isFormatOnlyString(_ source: String) -> Bool {
-        guard !source.isEmpty else { return true }
-        return source.allSatisfy { Self.formatOnlyChars.contains($0) }
-    }
-
-    /// Check if a source key is an Interface Builder Object ID (e.g. "D1K-K5-gc3.title").
-    /// Pattern: exactly `[A-Za-z0-9]{3}-[A-Za-z0-9]{2}-[A-Za-z0-9]{3}.` at the start.
-    private func isIBKey(_ source: String) -> Bool {
-        guard filterIBKeys else { return false }
-        let s = source.utf8
-        // Minimum length: 3 + 1 + 2 + 1 + 3 + 1 = 11 characters
-        guard s.count >= 11 else { return false }
-        var i = s.startIndex
-        @inline(__always) func isAlnum(_ b: UInt8) -> Bool {
-            (b >= 0x30 && b <= 0x39)    // 0-9
-            || (b >= 0x41 && b <= 0x5A) // A-Z
-            || (b >= 0x61 && b <= 0x7A) // a-z
-        }
-        // [A-Za-z0-9]{3}
-        for _ in 0..<3 { guard isAlnum(s[i]) else { return false }; i = s.index(after: i) }
-        guard s[i] == 0x2D else { return false }; i = s.index(after: i) // '-'
-        // [A-Za-z0-9]{2}
-        for _ in 0..<2 { guard isAlnum(s[i]) else { return false }; i = s.index(after: i) }
-        guard s[i] == 0x2D else { return false }; i = s.index(after: i) // '-'
-        // [A-Za-z0-9]{3}
-        for _ in 0..<3 { guard isAlnum(s[i]) else { return false }; i = s.index(after: i) }
-        guard s[i] == 0x2E else { return false } // '.'
-        return true
+            && filter.shouldInclude(source: row.source, fileName: row.fileName)
     }
 
     /// Unescape PostgreSQL COPY text format backslash sequences.

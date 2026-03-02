@@ -23,10 +23,36 @@ struct ResultsOutput: Codable, Sendable {
 }
 
 extension ResultsOutput {
+    /// Serialize to JSON Data, expanding structured targets (stringsdict JSON) as nested objects.
+    func buildJSONData() throws -> Data {
+        let resultsArray: [[String: Any]] = results.map { r in
+            var dict: [String: Any] = [
+                "source": r.source,
+                "bundle_name": r.bundleName,
+                "platform": r.platform,
+            ]
+            if let f = r.fileName { dict["file_name"] = f }
+            if let d = r.distance { dict["distance"] = d }
+            if let b = r.bundles { dict["bundles"] = b }
+
+            var trans: [String: Any] = [:]
+            for (lang, target) in r.translations {
+                if let parsed = StructuredTarget.parseAsJSON(target) {
+                    trans[lang] = parsed
+                } else {
+                    trans[lang] = target
+                }
+            }
+            dict["translations"] = trans
+            return dict
+        }
+
+        let output: [String: Any] = ["results": resultsArray]
+        return try JSONSerialization.data(withJSONObject: output, options: [.prettyPrinted, .sortedKeys])
+    }
+
     func printJSON() throws {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(self)
+        let data = try buildJSONData()
         print(String(data: data, encoding: .utf8)!)
     }
 }
