@@ -1,5 +1,22 @@
 import Foundation
 
+// MARK: - Logging & Formatting
+
+func logStderr(_ message: String, terminator: String = "\n") {
+    FileHandle.standardError.write(Data((message + terminator).utf8))
+}
+
+func formatTime(_ seconds: Double) -> String {
+    let m = Int(seconds) / 60
+    let s = Int(seconds) % 60
+    return m > 0 ? "\(m)m\(s)s" : "\(s)s"
+}
+
+func formatRate(_ count: Int, _ seconds: Double) -> String {
+    guard seconds > 0 else { return "—" }
+    return String(format: "%.0f", Double(count) / seconds)
+}
+
 extension Array where Element == Float {
     /// Convert a float vector to raw bytes for sqlite-vec insertion/queries.
     var asData: Data {
@@ -33,6 +50,12 @@ extension String {
     /// Comma-separated language list → Set with both _ and - variants.
     var normalizedLanguageSet: Set<String> {
         Set(commaSeparated.flatMap(\.languageCodeVariants))
+    }
+}
+
+extension Duration {
+    var seconds: Double {
+        Double(components.seconds) + Double(components.attoseconds) / 1e18
     }
 }
 

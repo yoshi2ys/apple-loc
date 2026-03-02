@@ -95,6 +95,38 @@ enum DatabaseManager {
         """, arguments: [name])! > 0
     }
 
+    /// Upsert a vector embedding via vec_mapping → vec_source_strings.
+    /// Handles the mapping table (globally unique rowid) and the vec0 virtual table.
+    static func upsertVector(in db: Database, sourceId: Int64, language: String, embedding: [Float]) throws {
+        try db.execute(sql: """
+            INSERT INTO vec_mapping(source_id, language) VALUES (?, ?)
+            ON CONFLICT(source_id, language) DO NOTHING
+        """, arguments: [sourceId, language])
+        let mapRow = try Row.fetchOne(db, sql:
+            "SELECT id FROM vec_mapping WHERE source_id = ? AND language = ?",
+            arguments: [sourceId, language])!
+        let mappingId: Int64 = mapRow["id"]
+
+        try db.execute(sql: "DELETE FROM vec_source_strings WHERE rowid = ?",
+                       arguments: [mappingId])
+        try db.execute(sql: "INSERT INTO vec_source_strings(rowid, language, embedding) VALUES (?, ?, ?)",
+                       arguments: [mappingId, language, embedding.asData])
+    }
+
+    /// Delete all embeddings for the given language codes (including variant forms).
+    static func deleteEmbeddings(for languages: [String], in db: Database) throws {
+        for lang in languages {
+            for v in lang.languageCodeVariants {
+                // Use subquery to delete vec rows in bulk instead of per-row
+                try db.execute(sql: """
+                    DELETE FROM vec_source_strings
+                    WHERE rowid IN (SELECT id FROM vec_mapping WHERE language = ?)
+                """, arguments: [v])
+                try db.execute(sql: "DELETE FROM vec_mapping WHERE language = ?", arguments: [v])
+            }
+        }
+    }
+
     /// Resolve ~ to the home directory.
     static func resolvePath(_ path: String) -> String {
         if path.hasPrefix("~/") {

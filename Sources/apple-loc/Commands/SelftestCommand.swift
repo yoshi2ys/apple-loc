@@ -22,6 +22,9 @@ struct SelftestCommand: AsyncParsableCommand {
         try testParallelEmbedding()
         try testSourceBundles()
         try testInfo()
+        try testAppendIngest()
+        try testEmbedFromDB()
+        try testEmbedSkipExisting()
         print("All selftests PASSED")
     }
 
@@ -576,5 +579,204 @@ struct SelftestCommand: AsyncParsableCommand {
                "FAIL: test precondition - nonexistent path exists")
 
         print("[PASS] Info command queries")
+    }
+
+    private func testAppendIngest() throws {
+        let path = "/tmp/apple-loc-append-test.db"
+        try? FileManager.default.removeItem(atPath: path)
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let dbQueue = try DatabaseManager.openDatabase(at: path, create: true)
+        try DatabaseManager.createSchema(in: dbQueue)
+
+        // Simulate initial ingest: insert a source string with English translation
+        try dbQueue.writeWithoutTransaction { db in
+            try db.execute(
+                sql: "INSERT INTO source_strings(source, bundle_name, bundle_priority, file_name, platform) VALUES (?,?,?,?,?)",
+                arguments: ["Camera", "UIKit.framework", BundlePriority.coreFramework.rawValue, "L.strings", "ios26"]
+            )
+            let sourceId = db.lastInsertedRowID
+
+            try db.execute(
+                sql: "INSERT INTO translations(source_id, language, target) VALUES (?,?,?)",
+                arguments: [sourceId, "en", "Camera"]
+            )
+        }
+
+        // Simulate append: add Japanese translation for the same source via UPSERT
+        try dbQueue.writeWithoutTransaction { db in
+            // UPSERT source_strings (same source+platform → no change)
+            try db.execute(sql: """
+                INSERT INTO source_strings(source, bundle_name, bundle_priority, file_name, platform)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(source, platform) DO UPDATE SET
+                    bundle_name = excluded.bundle_name,
+                    bundle_priority = excluded.bundle_priority
+                WHERE excluded.bundle_priority < source_strings.bundle_priority
+            """, arguments: ["Camera", "UIKit.framework", BundlePriority.coreFramework.rawValue, "L.strings", "ios26"])
+
+            let row = try Row.fetchOne(db, sql:
+                "SELECT id FROM source_strings WHERE source = ? AND platform = ?",
+                arguments: ["Camera", "ios26"])!
+            let sourceId: Int64 = row["id"]
+
+            // UPSERT translation (new language → insert)
+            try db.execute(sql: """
+                INSERT INTO translations(source_id, language, target) VALUES (?, ?, ?)
+                ON CONFLICT(source_id, language) DO UPDATE SET target = excluded.target
+            """, arguments: [sourceId, "ja", "カメラ"])
+
+            // Verify both translations exist
+            let count = try Int.fetchOne(db, sql:
+                "SELECT COUNT(*) FROM translations WHERE source_id = ?",
+                arguments: [sourceId])!
+            assert(count == 2, "FAIL: append should result in 2 translations, got \(count)")
+
+            // Verify source_strings has only 1 row (not duplicated)
+            let ssCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM source_strings")!
+            assert(ssCount == 1, "FAIL: append should not duplicate source_strings, got \(ssCount)")
+
+            // Verify both languages are present
+            let langs = try String.fetchAll(db, sql:
+                "SELECT language FROM translations WHERE source_id = ? ORDER BY language",
+                arguments: [sourceId])
+            assert(langs == ["en", "ja"], "FAIL: expected [en, ja], got \(langs)")
+        }
+
+        print("[PASS] Append ingest (UPSERT translations)")
+    }
+
+    private func testEmbedFromDB() throws {
+        let path = "/tmp/apple-loc-embedfromdb-test.db"
+        try? FileManager.default.removeItem(atPath: path)
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let dbQueue = try DatabaseManager.openDatabase(at: path, create: true)
+        try DatabaseManager.createSchema(in: dbQueue)
+
+        // Insert source + translation
+        try dbQueue.writeWithoutTransaction { db in
+            try db.execute(
+                sql: "INSERT INTO source_strings(source, bundle_name, bundle_priority, file_name, platform) VALUES (?,?,?,?,?)",
+                arguments: ["Camera", "UIKit.framework", 1, "L.strings", "ios26"]
+            )
+            let sourceId = db.lastInsertedRowID
+            try db.execute(
+                sql: "INSERT INTO translations(source_id, language, target) VALUES (?,?,?)",
+                arguments: [sourceId, "en", "Camera"]
+            )
+        }
+
+        // Generate embedding using EmbeddingService directly (simulating embed command logic)
+        guard let svc = EmbeddingService(language: .english) else {
+            print("[SKIP] embed-from-db - English model not available")
+            return
+        }
+        try svc.load()
+
+        let vec = try svc.embed("camera")  // lowercased as in embed command
+
+        // Insert via vec_mapping (same pattern as EmbedCommand)
+        try dbQueue.writeWithoutTransaction { db in
+            try db.execute(sql: """
+                INSERT INTO vec_mapping(source_id, language) VALUES (?, ?)
+                ON CONFLICT(source_id, language) DO NOTHING
+            """, arguments: [1, "en"])
+            let mappingId = db.lastInsertedRowID
+
+            try db.execute(sql:
+                "INSERT INTO vec_source_strings(rowid, language, embedding) VALUES (?, ?, ?)",
+                arguments: [mappingId, "en", vec.asData])
+
+            // Verify vec_mapping exists
+            let vmCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM vec_mapping WHERE language = 'en'")!
+            assert(vmCount == 1, "FAIL: expected 1 vec_mapping, got \(vmCount)")
+
+            // KNN search should find it
+            let results = try Row.fetchAll(db, sql: """
+                SELECT rowid, distance FROM vec_source_strings
+                WHERE embedding MATCH ? AND k = 1 AND language = ?
+            """, arguments: [vec.asData, "en"])
+            assert(results.count == 1, "FAIL: KNN should return 1 result, got \(results.count)")
+
+            let resultRowid: Int64 = results[0]["rowid"]
+            let mapRow = try Row.fetchOne(db, sql:
+                "SELECT source_id FROM vec_mapping WHERE id = ?", arguments: [resultRowid])!
+            let resolvedId: Int64 = mapRow["source_id"]
+            assert(resolvedId == 1, "FAIL: KNN result should map to source_id 1, got \(resolvedId)")
+        }
+
+        print("[PASS] Embed from DB (vec_mapping + KNN)")
+    }
+
+    private func testEmbedSkipExisting() throws {
+        let path = "/tmp/apple-loc-embedskip-test.db"
+        try? FileManager.default.removeItem(atPath: path)
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let dbQueue = try DatabaseManager.openDatabase(at: path, create: true)
+        try DatabaseManager.createSchema(in: dbQueue)
+
+        // Insert source + translation + existing embedding
+        try dbQueue.writeWithoutTransaction { db in
+            try db.execute(
+                sql: "INSERT INTO source_strings(source, bundle_name, bundle_priority, file_name, platform) VALUES (?,?,?,?,?)",
+                arguments: ["Done", "UIKit.framework", 1, "L.strings", "ios26"]
+            )
+            let sourceId = db.lastInsertedRowID
+
+            try db.execute(
+                sql: "INSERT INTO translations(source_id, language, target) VALUES (?,?,?)",
+                arguments: [sourceId, "en", "Done"]
+            )
+
+            // Pre-existing embedding
+            try db.execute(sql: "INSERT INTO vec_mapping(source_id, language) VALUES (?, ?)",
+                           arguments: [sourceId, "en"])
+            let mappingId = db.lastInsertedRowID
+            let vec: [Float] = .init(repeating: 0.5, count: 512)
+            try db.execute(sql:
+                "INSERT INTO vec_source_strings(rowid, language, embedding) VALUES (?, ?, ?)",
+                arguments: [mappingId, "en", vec.asData])
+        }
+
+        // Cursor query should return 0 rows (embedding already exists)
+        try dbQueue.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT t.source_id, t.target FROM translations t
+                LEFT JOIN vec_mapping vm ON vm.source_id = t.source_id AND vm.language = ?
+                WHERE t.language = ? AND vm.id IS NULL AND t.source_id > ?
+                ORDER BY t.source_id LIMIT ?
+            """, arguments: ["en", "en", 0, 100])
+            assert(rows.isEmpty, "FAIL: cursor query should return 0 rows for already-embedded, got \(rows.count)")
+        }
+
+        // Now add a second source WITHOUT embedding
+        try dbQueue.writeWithoutTransaction { db in
+            try db.execute(
+                sql: "INSERT INTO source_strings(source, bundle_name, bundle_priority, file_name, platform) VALUES (?,?,?,?,?)",
+                arguments: ["Cancel", "UIKit.framework", 1, "L.strings", "ios26"]
+            )
+            let sourceId = db.lastInsertedRowID
+            try db.execute(
+                sql: "INSERT INTO translations(source_id, language, target) VALUES (?,?,?)",
+                arguments: [sourceId, "en", "Cancel"]
+            )
+        }
+
+        // Cursor query should return only the new unembedded row
+        try dbQueue.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT t.source_id, t.target FROM translations t
+                LEFT JOIN vec_mapping vm ON vm.source_id = t.source_id AND vm.language = ?
+                WHERE t.language = ? AND vm.id IS NULL AND t.source_id > ?
+                ORDER BY t.source_id LIMIT ?
+            """, arguments: ["en", "en", 0, 100])
+            assert(rows.count == 1, "FAIL: cursor should return 1 unembedded row, got \(rows.count)")
+            let target: String = rows[0]["target"]
+            assert(target == "Cancel", "FAIL: unembedded row should be Cancel, got \(target)")
+        }
+
+        print("[PASS] Embed skip existing (cursor query filters embedded rows)")
     }
 }

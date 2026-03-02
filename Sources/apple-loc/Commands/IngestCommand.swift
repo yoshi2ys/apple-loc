@@ -24,6 +24,9 @@ struct IngestCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Overwrite existing database.")
     var force: Bool = false
 
+    @Flag(name: .long, help: "Append to existing database instead of creating a new one.")
+    var append: Bool = false
+
     @Option(name: .long, help: "Batch size for inserts.")
     var batchSize: Int = 5000
 
@@ -37,15 +40,25 @@ struct IngestCommand: AsyncParsableCommand {
     var compact: Bool = false
 
     func run() async throws {
+        // Validate flags
+        if append && force {
+            throw ValidationError("--append and --force are mutually exclusive.")
+        }
+
         let dbPath = DatabaseManager.resolvePath(db)
         let fm = FileManager.default
+        let dbExists = fm.fileExists(atPath: dbPath)
 
         // Check existing DB
-        if fm.fileExists(atPath: dbPath) {
+        if append {
+            guard dbExists else {
+                throw ValidationError("Database not found at '\(dbPath)'. --append requires an existing database.")
+            }
+        } else if dbExists {
             if force {
                 try fm.removeItem(atPath: dbPath)
             } else {
-                throw ValidationError("Database already exists at '\(dbPath)'. Use --force to overwrite.")
+                throw ValidationError("Database already exists at '\(dbPath)'. Use --force to overwrite or --append to add data.")
             }
         }
 
@@ -58,61 +71,47 @@ struct IngestCommand: AsyncParsableCommand {
             var codes = langsArg.commaSeparated
             // Auto-add embed languages to ensure they're imported
             for el in embedLangs where !codes.contains(el) {
-                log("Auto-adding '\(el)' (required for embedding).")
+                logStderr("Auto-adding '\(el)' (required for embedding).")
                 codes.append(el)
             }
             langCodes = codes
-            log("Importing \(codes.count) languages: \(codes.joined(separator: ", "))")
+            logStderr("Importing \(codes.count) languages: \(codes.joined(separator: ", "))")
         } else {
             langCodes = nil
-            log("Importing all languages.")
+            logStderr("Importing all languages.")
         }
 
-        // Load embedding workers
-        var embedWorkers: [EmbedWorker] = []
+        // Load embedding workers via pool
+        let pool: EmbedWorkerPool?
         switch embed {
         case .none:
-            log("Embedding: disabled (--embed none)")
+            logStderr("Embedding: disabled (--embed none)")
+            pool = nil
 
         case .en, .langs:
-            let targetLangs = embed.languages()
-            let workerCount = concurrency ?? max(1, ProcessInfo.processInfo.activeProcessorCount / 2)
-
-            let maxWorkers = ProcessInfo.processInfo.activeProcessorCount
-            let totalWorkers = workerCount * targetLangs.count
-            if totalWorkers > maxWorkers {
-                throw ValidationError(
-                    "Too many embedding workers: \(workerCount) × \(targetLangs.count) languages = \(totalWorkers) (max: \(maxWorkers)). Reduce --concurrency or the number of languages."
-                )
-            }
-
-            var loadedLangCount = 0
-            for code in targetLangs {
-                guard let resolvedLang = EmbeddingService.resolveLanguage(for: code) else {
-                    log("Warning: no embedding model for '\(code)', skipping.")
-                    continue
-                }
-                let usedFallback = resolvedLang.rawValue != code
-                for i in 0..<workerCount {
-                    guard let svc = EmbeddingService(language: resolvedLang) else { break }
-                    try svc.load()
-                    embedWorkers.append(EmbedWorker(
-                        language: code, service: svc,
-                        queue: DispatchQueue(label: "embed-\(code)-\(i)")
-                    ))
-                }
-                if embedWorkers.last?.language == code {
-                    loadedLangCount += 1
-                    if usedFallback { log("  '\(code)' → using '\(resolvedLang.rawValue)' embedding model") }
-                }
-            }
-            log("Embedding workers: \(workerCount) × \(loadedLangCount) languages = \(embedWorkers.count) total")
+            pool = try EmbedWorkerPool(languages: embed.languages(), concurrency: concurrency, log: { logStderr($0) })
         }
 
         // Open DB and create schema
         let dbQueue = try DatabaseManager.openDatabase(at: dbPath, create: true)
-        try DatabaseManager.createSchema(in: dbQueue, compact: compact)
-        log("Database created at \(dbPath)\(compact ? " (compact mode)" : "")")
+
+        // Auto-detect compact mode on append
+        let effectiveCompact: Bool
+        if append {
+            effectiveCompact = try await dbQueue.read { db in
+                !(try DatabaseManager.tableExists("source_bundles", in: db))
+            }
+            if effectiveCompact != compact && compact {
+                logStderr("Warning: ignoring --compact (existing DB already has source_bundles).")
+            }
+        } else {
+            effectiveCompact = compact
+        }
+
+        try DatabaseManager.createSchema(in: dbQueue, compact: effectiveCompact)
+        logStderr(append
+            ? "Appending to database at \(dbPath)"
+            : "Database created at \(dbPath)\(effectiveCompact ? " (compact mode)" : "")")
 
         // Parse and ingest
         var parser = SQLDumpParser(
@@ -121,7 +120,7 @@ struct IngestCommand: AsyncParsableCommand {
             allowedPlatforms: platform.map { Set($0.commaSeparated) }
         )
         parser.onTableFound = { table, processing in
-            log("  \(processing ? "▶" : "⏭") \(table)")
+            logStderr("  \(processing ? "▶" : "⏭") \(table)")
         }
 
         let startTime = ContinuousClock.now
@@ -129,29 +128,28 @@ struct IngestCommand: AsyncParsableCommand {
         batch.reserveCapacity(batchSize)
         var stats = IngestStats()
         var dedupCache = DedupCache()
-        let workersByLang = Dictionary(grouping: embedWorkers, by: \.language)
 
         _ = try parser.parse { row in
             batch.append(row)
             if batch.count >= batchSize {
-                try processBatch(batch, into: dbQueue, workersByLang: workersByLang, stats: &stats, dedupCache: &dedupCache, compact: compact)
+                try processBatch(batch, into: dbQueue, pool: pool, stats: &stats, dedupCache: &dedupCache, compact: effectiveCompact)
                 batch.removeAll(keepingCapacity: true)
 
                 let elapsed = ContinuousClock.now - startTime
                 let secs = elapsed.seconds
-                log("\r  \(stats.totalRows) rows, \(stats.sources) sources, \(stats.vectors) vectors | \(formatRate(stats.totalRows, secs)) rows/s | \(formatTime(secs))", terminator: "")
+                logStderr("\r  \(stats.totalRows) rows, \(stats.sources) sources, \(stats.vectors) vectors | \(formatRate(stats.totalRows, secs)) rows/s | \(formatTime(secs))", terminator: "")
             }
         }
 
         // Flush remaining
         if !batch.isEmpty {
-            try processBatch(batch, into: dbQueue, workersByLang: workersByLang, stats: &stats, dedupCache: &dedupCache, compact: compact)
+            try processBatch(batch, into: dbQueue, pool: pool, stats: &stats, dedupCache: &dedupCache, compact: effectiveCompact)
         }
 
         let elapsed = (ContinuousClock.now - startTime).seconds
-        log("")  // newline after progress
-        log("Done: \(stats.totalRows) rows, \(stats.sources) sources, \(stats.vectors) vectors in \(formatTime(elapsed))")
-        log("Dedup cache: \(dedupCache.entries.count) unique (source, platform) pairs")
+        logStderr("")  // newline after progress
+        logStderr("Done: \(stats.totalRows) rows, \(stats.sources) sources, \(stats.vectors) vectors in \(formatTime(elapsed))")
+        logStderr("Dedup cache: \(dedupCache.entries.count) unique (source, platform) pairs")
 
         // Output summary as JSON to stdout
         let embedModeStr: String
@@ -171,7 +169,7 @@ struct IngestCommand: AsyncParsableCommand {
             "elapsed_seconds": round(elapsed * 10) / 10,
             "db_path": dbPath,
             "embed_mode": embedModeStr,
-            "embed_langs": embedWorkers.map(\.language),
+            "embed_langs": pool.map { Array($0.supportedLanguages.sorted()) } ?? [],
         ]
         let jsonData = try JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys])
         print(String(data: jsonData, encoding: .utf8)!)
@@ -202,12 +200,6 @@ struct IngestCommand: AsyncParsableCommand {
             case .langs(let codes): return codes
             }
         }
-    }
-
-    private struct EmbedWorker {
-        let language: String
-        let service: EmbeddingService
-        let queue: DispatchQueue
     }
 
     // MARK: - Dedup Types
@@ -243,11 +235,12 @@ struct IngestCommand: AsyncParsableCommand {
     private func processBatch(
         _ rows: [ParsedRow],
         into dbQueue: DatabaseQueue,
-        workersByLang: [String: [EmbedWorker]],
+        pool: EmbedWorkerPool?,
         stats: inout IngestStats,
         dedupCache: inout DedupCache,
         compact: Bool = false
     ) throws {
+        let embedLangs = pool?.supportedLanguages ?? []
         // Step 1: In-batch dedup — for each (source, platform), keep the best bundle
         struct BatchEntry {
             var row: ParsedRow
@@ -317,7 +310,7 @@ struct IngestCommand: AsyncParsableCommand {
             guard p.needsUpsert else { continue }
             let cachedSourceId = dedupCache.entries[p.key]?.sourceId
 
-            for lang in workersByLang.keys {
+            for lang in embedLangs {
                 // Skip if already vectorized for this (sourceId, language)
                 if let sid = cachedSourceId,
                    dedupCache.vectorized.contains(VecKey(sourceId: sid, language: lang)) {
@@ -336,45 +329,13 @@ struct IngestCommand: AsyncParsableCommand {
         }
         var embeddings: [EmbedResultKey: [Float]] = [:]
 
-        if !embeddingTargets.isEmpty {
-            // Group targets by language, then distribute across that language's workers
-            let targetsByLang = Dictionary(grouping: embeddingTargets.indices, by: { embeddingTargets[$0].language })
+        if !embeddingTargets.isEmpty, let pool {
+            let poolTargets = embeddingTargets.map { (language: $0.language, text: $0.text) }
+            let poolResults = pool.embed(targets: poolTargets)
 
-            for (lang, indices) in targetsByLang {
-                let workers = workersByLang[lang]!
-                if workers.count == 1 {
-                    // Single-worker path (no async overhead)
-                    for i in indices {
-                        let t = embeddingTargets[i]
-                        if let vec = try? workers[0].service.embed(t.text) {
-                            embeddings[EmbedResultKey(key: t.key, language: lang)] = vec
-                        }
-                    }
-                } else {
-                    // Parallel embedding — one serial queue per worker
-                    let count = indices.count
-                    nonisolated(unsafe) let results = UnsafeMutableBufferPointer<[Float]?>.allocate(capacity: count)
-                    results.initialize(repeating: nil)
-                    defer { results.deallocate() }
-
-                    let targets = embeddingTargets  // local let copy for Sendable closure
-                    let group = DispatchGroup()
-                    for (j, idx) in indices.enumerated() {
-                        let workerIdx = j % workers.count
-                        group.enter()
-                        workers[workerIdx].queue.async {
-                            results[j] = try? workers[workerIdx].service.embed(targets[idx].text)
-                            group.leave()
-                        }
-                    }
-                    group.wait()
-
-                    for (j, idx) in indices.enumerated() {
-                        if let vec = results[j] {
-                            let t = embeddingTargets[idx]
-                            embeddings[EmbedResultKey(key: t.key, language: lang)] = vec
-                        }
-                    }
+            for (i, target) in embeddingTargets.enumerated() {
+                if let vec = poolResults[i] {
+                    embeddings[EmbedResultKey(key: target.key, language: target.language)] = vec
                 }
             }
         }
@@ -444,28 +405,11 @@ struct IngestCommand: AsyncParsableCommand {
                 }
 
                 // Insert vectors via vec_mapping for each language that has an embedding
-                for lang in workersByLang.keys {
+                for lang in embedLangs {
                     let vecKey = VecKey(sourceId: sourceId, language: lang)
                     let embedKey = EmbedResultKey(key: p.key, language: lang)
                     if let vec = embeddings[embedKey], !dedupCache.vectorized.contains(vecKey) {
-                        // Get or create mapping ID (globally unique rowid for vec table)
-                        try db.execute(sql: """
-                            INSERT INTO vec_mapping(source_id, language) VALUES (?, ?)
-                            ON CONFLICT(source_id, language) DO NOTHING
-                        """, arguments: [sourceId, lang])
-                        let mapRow = try Row.fetchOne(db, sql: """
-                            SELECT id FROM vec_mapping WHERE source_id = ? AND language = ?
-                        """, arguments: [sourceId, lang])!
-                        let mappingId: Int64 = mapRow["id"]
-
-                        try db.execute(
-                            sql: "DELETE FROM vec_source_strings WHERE rowid = ?",
-                            arguments: [mappingId]
-                        )
-                        try db.execute(
-                            sql: "INSERT INTO vec_source_strings(rowid, language, embedding) VALUES (?, ?, ?)",
-                            arguments: [mappingId, lang, vec.asData]
-                        )
+                        try DatabaseManager.upsertVector(in: db, sourceId: sourceId, language: lang, embedding: vec)
                         dedupCache.vectorized.insert(vecKey)
                         newVectors += 1
                     }
@@ -480,26 +424,4 @@ struct IngestCommand: AsyncParsableCommand {
         stats.vectors += newVectors
     }
 
-    // MARK: - Helpers
-
-    private func log(_ message: String, terminator: String = "\n") {
-        FileHandle.standardError.write(Data((message + terminator).utf8))
-    }
-
-    private func formatTime(_ seconds: Double) -> String {
-        let m = Int(seconds) / 60
-        let s = Int(seconds) % 60
-        return m > 0 ? "\(m)m\(s)s" : "\(s)s"
-    }
-
-    private func formatRate(_ count: Int, _ seconds: Double) -> String {
-        guard seconds > 0 else { return "—" }
-        return String(format: "%.0f", Double(count) / seconds)
-    }
-}
-
-extension Duration {
-    var seconds: Double {
-        Double(components.seconds) + Double(components.attoseconds) / 1e18
-    }
 }
