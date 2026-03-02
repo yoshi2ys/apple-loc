@@ -45,7 +45,7 @@ struct LookupCommand: AsyncParsableCommand {
         let dbPath = DatabaseManager.resolvePath(db)
         let dbQueue = try DatabaseManager.openDatabase(at: dbPath)
 
-        let langFilter = lang.map { Set($0.commaSeparated) }
+        let langFilter = lang.map { $0.normalizedLanguageSet }
 
         let results: [SearchResult] = try await dbQueue.read { db in
             let sourceIds: [Int64]

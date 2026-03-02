@@ -187,7 +187,7 @@ struct SQLDumpParser {
 
     /// Combined filter: language, IB keys, excluded files, plist metadata, format-only strings.
     private func shouldInclude(_ row: ParsedRow) -> Bool {
-        (allowedLanguages?.contains(row.language) ?? true)
+        (allowedLanguages?.matchesLanguage(row.language) ?? true)
             && !isIBKey(row.source)
             && !isExcludedFile(row.fileName)
             && !isPlistMetadataKey(row.source)

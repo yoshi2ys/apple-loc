@@ -117,7 +117,7 @@ struct IngestCommand: AsyncParsableCommand {
         // Parse and ingest
         var parser = SQLDumpParser(
             dataDir: dataDir,
-            allowedLanguages: langCodes.map(Set.init),
+            allowedLanguages: langCodes.map { Set($0.flatMap(\.languageCodeVariants)) },
             allowedPlatforms: platform.map { Set($0.commaSeparated) }
         )
         parser.onTableFound = { table, processing in

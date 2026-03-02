@@ -33,7 +33,7 @@ struct SearchCommand: AsyncParsableCommand {
     func run() async throws {
         let dbPath = DatabaseManager.resolvePath(db)
         let dbQueue = try DatabaseManager.openDatabase(at: dbPath)
-        let langFilter = lang.map { Set($0.commaSeparated) }
+        let langFilter = lang.map { $0.normalizedLanguageSet }
         let fw = framework
         let plat = platform
         let maxResults = limit
@@ -44,17 +44,30 @@ struct SearchCommand: AsyncParsableCommand {
         recognizer.processString(query)
         let detectedLang = recognizer.dominantLanguage
 
-        let queryLangCode = queryLang ?? detectedLang?.rawValue ?? "en"
-        let isEnglish = queryLangCode == "en"
+        let rawQueryLang = queryLang ?? detectedLang?.rawValue ?? "en"
+        let queryLangVariants = rawQueryLang.languageCodeVariants
+        let isEnglish = queryLangVariants.contains("en")
 
         // --- Semantic search (language-aware) ---
-        // Check if embeddings exist for the detected language
+        // Resolve language code to DB form (handles zh_Hans ↔ zh-Hans) and check embeddings
         var semanticIds: [(sourceId: Int64, distance: Double)] = []
 
-        let hasEmbeddings = try await dbQueue.read { db in
-            try Int.fetchOne(db, sql: """
-                SELECT COUNT(*) FROM vec_mapping WHERE language = ? LIMIT 1
-            """, arguments: [queryLangCode]) ?? 0 > 0
+        let (queryLangCode, hasEmbeddings) = try await dbQueue.read { db -> (String, Bool) in
+            for variant in queryLangVariants {
+                if try Int.fetchOne(db, sql: """
+                    SELECT 1 FROM vec_mapping WHERE language = ? LIMIT 1
+                """, arguments: [variant]) != nil {
+                    return (variant, true)
+                }
+            }
+            for variant in queryLangVariants {
+                if try Int.fetchOne(db, sql: """
+                    SELECT 1 FROM translations WHERE language = ? LIMIT 1
+                """, arguments: [variant]) != nil {
+                    return (variant, false)
+                }
+            }
+            return (rawQueryLang, false)
         }
 
         if hasEmbeddings {
@@ -90,7 +103,7 @@ struct SearchCommand: AsyncParsableCommand {
         // For English queries, search English translations.
         // For non-English auto-detected queries, search ALL languages to avoid
         // misdetection (e.g. NLLanguageRecognizer confuses ja/zh for short CJK text).
-        let textLang: String? = queryLang ?? (isEnglish ? "en" : nil)
+        let textLang: String? = queryLang != nil ? queryLangCode : (isEnglish ? "en" : nil)
         let escapedQuery = query
             .replacingOccurrences(of: "%", with: "\\%")
             .replacingOccurrences(of: "_", with: "\\_")

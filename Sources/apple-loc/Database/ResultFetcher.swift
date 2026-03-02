@@ -87,7 +87,7 @@ enum ResultFetcher {
 
             var translations: [String: String] = [:]
             for (lang, target) in transMap[candidate.sourceId] ?? [] {
-                if let filter = langFilter, !filter.contains(lang) { continue }
+                if let filter = langFilter, !filter.matchesLanguage(lang) { continue }
                 translations[lang] = target
             }
 
