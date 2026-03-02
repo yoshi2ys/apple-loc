@@ -24,6 +24,9 @@ struct SearchCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Query language for text search (e.g. \"ja\"). Omit to auto-detect or search all languages.")
     var queryLang: String?
 
+    @Flag(name: .customLong("internal"), help: "Include [Internal] entries (hidden by default).")
+    var includeInternal: Bool = false
+
     @Option(name: .long, help: "Maximum number of results.")
     var limit: Int = 5
 
@@ -163,6 +166,7 @@ struct SearchCommand: AsyncParsableCommand {
 
         // --- Fetch full results ---
         let candidates = sortedIds.map { ResultFetcher.Candidate(sourceId: $0.0, distance: $0.1) }
+        let incInternal = includeInternal
         let results: [SearchResult] = try await dbQueue.read { db in
             try ResultFetcher.fetch(
                 candidates: candidates,
@@ -171,7 +175,8 @@ struct SearchCommand: AsyncParsableCommand {
                 frameworkFilter: fw,
                 platformFilter: plat,
                 limit: maxResults,
-                deduplicateByTranslation: true
+                deduplicateByTranslation: true,
+                includeInternal: incInternal
             )
         }
 

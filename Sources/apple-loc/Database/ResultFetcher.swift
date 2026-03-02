@@ -18,7 +18,8 @@ enum ResultFetcher {
         frameworkFilter: String?,
         platformFilter: String?,
         limit: Int,
-        deduplicateByTranslation: Bool = false
+        deduplicateByTranslation: Bool = false,
+        includeInternal: Bool = false
     ) throws -> [SearchResult] {
         guard !candidates.isEmpty else { return [] }
 
@@ -71,6 +72,9 @@ enum ResultFetcher {
         for candidate in candidates {
             guard let ss = sourceMap[candidate.sourceId] else { continue }
 
+            let source: String = ss["source"]
+            if !includeInternal && (source.hasPrefix("[Internal]") || source.hasPrefix("[INTERNAL]")) { continue }
+
             let bundleName: String = ss["bundle_name"]
             let rowPlatform: String = ss["platform"]
             let allBundles = bundlesMap[candidate.sourceId]
@@ -103,7 +107,7 @@ enum ResultFetcher {
 
             let sortedBundles = allBundles?.sorted()
             results.append(SearchResult(
-                source: ss["source"],
+                source: source,
                 bundleName: bundleName,
                 fileName: ss["file_name"],
                 platform: rowPlatform,

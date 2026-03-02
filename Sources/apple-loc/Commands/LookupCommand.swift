@@ -26,6 +26,9 @@ struct LookupCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Wrap key/target with %% wildcards for substring matching.")
     var fuzzy: Bool = false
 
+    @Flag(name: .customLong("internal"), help: "Include [Internal] entries (hidden by default).")
+    var includeInternal: Bool = false
+
     @Option(name: .long, help: "Maximum number of results.")
     var limit: Int = 20
 
@@ -63,7 +66,8 @@ struct LookupCommand: AsyncParsableCommand {
                 langFilter: langFilter,
                 frameworkFilter: framework,
                 platformFilter: platform,
-                limit: limit
+                limit: limit,
+                includeInternal: includeInternal
             )
         }
 
@@ -80,6 +84,9 @@ struct LookupCommand: AsyncParsableCommand {
         sql += useLike ? "source LIKE ?" : "source = ?"
         var args: [any DatabaseValueConvertible] = [effectiveKey]
 
+        if !includeInternal {
+            sql += " AND source NOT LIKE '[Internal]%'"
+        }
         if let p = platform {
             sql += " AND platform = ?"
             args.append(p)
@@ -102,6 +109,9 @@ struct LookupCommand: AsyncParsableCommand {
         sql += useLike ? " t.target LIKE ?" : " t.target = ?"
         var args: [any DatabaseValueConvertible] = [effectiveTarget]
 
+        if !includeInternal {
+            sql += " AND ss.source NOT LIKE '[Internal]%'"
+        }
         if let p = platform {
             sql += " AND ss.platform = ?"
             args.append(p)

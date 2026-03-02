@@ -25,6 +25,7 @@ struct SelftestCommand: AsyncParsableCommand {
         try testAppendIngest()
         try testEmbedFromDB()
         try testEmbedSkipExisting()
+        try testInternalFilter()
         print("All selftests PASSED")
     }
 
@@ -778,5 +779,70 @@ struct SelftestCommand: AsyncParsableCommand {
         }
 
         print("[PASS] Embed skip existing (cursor query filters embedded rows)")
+    }
+
+    private func testInternalFilter() throws {
+        let path = "/tmp/apple-loc-internal-test.db"
+        try? FileManager.default.removeItem(atPath: path)
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let dbQueue = try DatabaseManager.openDatabase(at: path, create: true)
+        try DatabaseManager.createSchema(in: dbQueue)
+
+        try dbQueue.writeWithoutTransaction { db in
+            // Insert a normal entry
+            try db.execute(
+                sql: "INSERT INTO source_strings(source, bundle_name, bundle_priority, file_name, platform) VALUES (?,?,?,?,?)",
+                arguments: ["Camera", "UIKit.framework", 1, "L.strings", "ios26"]
+            )
+            let normalId = db.lastInsertedRowID
+            try db.execute(
+                sql: "INSERT INTO translations(source_id, language, target) VALUES (?,?,?)",
+                arguments: [normalId, "en", "Camera"]
+            )
+
+            // Insert an [Internal] entry
+            try db.execute(
+                sql: "INSERT INTO source_strings(source, bundle_name, bundle_priority, file_name, platform) VALUES (?,?,?,?,?)",
+                arguments: ["[Internal] File Radar: Chapter Feedback", "UIKit.framework", 1, "L.strings", "ios26"]
+            )
+            let internalId = db.lastInsertedRowID
+            try db.execute(
+                sql: "INSERT INTO translations(source_id, language, target) VALUES (?,?,?)",
+                arguments: [internalId, "en", "[Internal] File Radar: Chapter Feedback"]
+            )
+
+            let allCandidates = [
+                ResultFetcher.Candidate(sourceId: normalId, distance: nil),
+                ResultFetcher.Candidate(sourceId: internalId, distance: nil),
+            ]
+
+            // includeInternal: false → only normal entry
+            let filtered = try ResultFetcher.fetch(
+                candidates: allCandidates,
+                in: db,
+                langFilter: nil,
+                frameworkFilter: nil,
+                platformFilter: nil,
+                limit: 10,
+                includeInternal: false
+            )
+            assert(filtered.count == 1, "FAIL: internal filter should return 1, got \(filtered.count)")
+            assert(filtered[0].source == "Camera", "FAIL: filtered result should be Camera")
+
+            // includeInternal: true → both entries
+            let unfiltered = try ResultFetcher.fetch(
+                candidates: allCandidates,
+                in: db,
+                langFilter: nil,
+                frameworkFilter: nil,
+                platformFilter: nil,
+                limit: 10,
+                includeInternal: true
+            )
+            assert(unfiltered.count == 2, "FAIL: unfiltered should return 2, got \(unfiltered.count)")
+        }
+
+        print("[PASS] Internal entry filter ([Internal] prefix hidden by default)")
     }
 }
