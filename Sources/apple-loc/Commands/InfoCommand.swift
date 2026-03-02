@@ -26,7 +26,14 @@ struct InfoCommand: AsyncParsableCommand {
 
         let output: InfoOutput = try await dbQueue.read { db in
             let platforms = try String.fetchAll(db, sql:
-                "SELECT DISTINCT platform FROM source_strings ORDER BY platform")
+                "SELECT DISTINCT platform FROM source_strings"
+            ).sorted { a, b in
+                let am = a.hasPrefix("macos"), bm = b.hasPrefix("macos")
+                if am != bm { return am }
+                let va = Int(a.drop(while: { !$0.isNumber })) ?? 0
+                let vb = Int(b.drop(while: { !$0.isNumber })) ?? 0
+                return va > vb
+            }
             let languages = try String.fetchAll(db, sql:
                 "SELECT DISTINCT language FROM translations ORDER BY language")
             let embeddingLanguages = try String.fetchAll(db, sql:
