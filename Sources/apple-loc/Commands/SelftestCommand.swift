@@ -14,9 +14,6 @@ struct SelftestCommand: AsyncParsableCommand {
         try testVecIntegration()
         try testMultiLangVec()
         try testFuzzyLookup()
-        try testParser()
-        try testParserIBFilter()
-        try testParserExclusion()
         try testDedupPriority()
         try testEmbedding()
         try testParallelEmbedding()
@@ -26,6 +23,10 @@ struct SelftestCommand: AsyncParsableCommand {
         try testEmbedFromDB()
         try testEmbedSkipExisting()
         try testInternalFilter()
+        try testJSONParser()
+        try testPlatformConversion()
+        try testStructuredTargetResolution()
+        try testStructuredTargetOutput()
         print("All selftests PASSED")
     }
 
@@ -209,125 +210,6 @@ struct SelftestCommand: AsyncParsableCommand {
             assert(ciSources.count == 3, "FAIL: case-insensitive fuzzy should find 3 results, got \(ciSources.count)")
         }
         print("[PASS] Fuzzy lookup (substring matching via LIKE)")
-    }
-
-    private func testParser() throws {
-        let tmpDir = "/tmp/apple-loc-parser-test"
-        try? FileManager.default.removeItem(atPath: tmpDir)
-        try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(atPath: tmpDir) }
-
-        let testData = """
-        CREATE TABLE ios26 (id integer NOT NULL);
-        COPY ios26 (id, group_id, source, target, language, file_name, bundle_name, bundle_path, platform) FROM stdin;
-        1\t1\tCamera\tカメラ\tja\tLocalizable.strings\tUIKit.framework\t/path\tiOS
-        2\t1\tCamera\tCamera\ten\tLocalizable.strings\tUIKit.framework\t/path\tiOS
-        3\t2\tSettings\t設定\tja\tLocalizable.strings\tPreferences.framework\t/path\tiOS
-        4\t2\tSettings\tEinstellungen\tde\tLocalizable.strings\tPreferences.framework\t/path\tiOS
-        \\.
-        """
-        let filePath = (tmpDir as NSString).appendingPathComponent("data.sql.aa")
-        try testData.write(toFile: filePath, atomically: true, encoding: .utf8)
-
-        var parser = SQLDumpParser(
-            dataDir: tmpDir,
-            allowedLanguages: ["ja", "en"],
-            allowedPlatforms: ["ios26"]
-        )
-        parser.filterIBKeys = false  // Don't filter IB keys in this basic test
-
-        var rows: [ParsedRow] = []
-        let count = try parser.parse { row in rows.append(row) }
-
-        assert(count == 3, "FAIL: parser expected 3 rows, got \(count)")
-        assert(rows[0].source == "Camera" && rows[0].target == "カメラ", "FAIL: row 0")
-        assert(rows[0].groupId == 1, "FAIL: row 0 groupId")
-        assert(rows[1].language == "en", "FAIL: row 1 language")
-        assert(rows[2].platform == "ios26", "FAIL: row 2 platform")
-        assert(!rows.contains(where: { $0.language == "de" }), "FAIL: de not filtered")
-        print("[PASS] SQL dump parser (\(count) rows)")
-    }
-
-    private func testParserIBFilter() throws {
-        let tmpDir = "/tmp/apple-loc-ib-test"
-        try? FileManager.default.removeItem(atPath: tmpDir)
-        try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(atPath: tmpDir) }
-
-        let testData = """
-        COPY ios26 (id, group_id, source, target, language, file_name, bundle_name, bundle_path, platform) FROM stdin;
-        1\t1\tCancel\tキャンセル\tja\tL.strings\tUIKit\t/p\tiOS
-        2\t2\tD1K-K5-gc3.title\tあ\tja\tMain.strings\tApp\t/p\tiOS
-        3\t3\t8PE-KZ-giS.text\tい\tja\tMain.strings\tApp\t/p\tiOS
-        4\t4\t22.title\tキャンセル\tja\tL.strings\tUIKit\t/p\tiOS
-        \\.
-        """
-        let filePath = (tmpDir as NSString).appendingPathComponent("data.sql.aa")
-        try testData.write(toFile: filePath, atomically: true, encoding: .utf8)
-
-        let parser = SQLDumpParser(
-            dataDir: tmpDir,
-            allowedLanguages: ["ja"],
-            allowedPlatforms: ["ios26"]
-        )
-
-        var rows: [ParsedRow] = []
-        let count = try parser.parse { row in rows.append(row) }
-
-        // Should keep Cancel and 22.title, filter out IB keys
-        assert(count == 2, "FAIL: IB filter expected 2 rows, got \(count)")
-        assert(rows[0].source == "Cancel", "FAIL: first row should be Cancel")
-        assert(rows[1].source == "22.title", "FAIL: second row should be 22.title (numeric keys kept)")
-        print("[PASS] IB key filter (\(count) rows kept, 2 IB keys filtered)")
-    }
-
-    private func testParserExclusion() throws {
-        let tmpDir = "/tmp/apple-loc-exclusion-test"
-        try? FileManager.default.removeItem(atPath: tmpDir)
-        try FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(atPath: tmpDir) }
-
-        let testData = """
-        COPY macos26 (id, group_id, source, target, language, file_name, bundle_name, bundle_path, platform) FROM stdin;
-        1\t1\tCamera\tCamera\ten\tLocalizable.strings\tUIKit.framework\t/p\tmacOS
-        2\t2\tCFBundleName\tFinder\ten\tInfoPlist.strings\tFinder.app\t/p\tmacOS
-        3\t3\tNSHumanReadableCopyright\tCopyright\ten\tInfoPlist.strings\tApp.app\t/p\tmacOS
-        4\t4\tSettings\tSettings\ten\tInfoPlist.loctable\tSettings.app\t/p\tmacOS
-        5\t5\tOpen\tOpen\ten\tAppIntents.strings\tApp.app\t/p\tmacOS
-        6\t6\t%@\t%@\ten\tLocalizable.strings\tUIKit.framework\t/p\tmacOS
-        7\t7\t%d %@\t%d %@\ten\tLocalizable.strings\tUIKit.framework\t/p\tmacOS
-        8\t8\tDone\tDone\ten\tLocalizable.strings\tUIKit.framework\t/p\tmacOS
-        9\t9\tCFBundleDisplayName\tMaps\ten\tLocalizable.strings\tMaps.app\t/p\tmacOS
-        10\t10\tShortcuts\tShortcuts\ten\tAppShortcuts.strings\tApp.app\t/p\tmacOS
-        \\.
-        """
-        let filePath = (tmpDir as NSString).appendingPathComponent("data.sql.aa")
-        try testData.write(toFile: filePath, atomically: true, encoding: .utf8)
-
-        var parser = SQLDumpParser(
-            dataDir: tmpDir,
-            allowedLanguages: ["en"],
-            allowedPlatforms: ["macos26"]
-        )
-        parser.filterIBKeys = false
-
-        var rows: [ParsedRow] = []
-        let count = try parser.parse { row in rows.append(row) }
-
-        // Should keep: Camera, Done (2 rows)
-        // Should filter: CFBundleName (plist key), NSHumanReadableCopyright (plist key),
-        //   Settings from InfoPlist.loctable (excluded file), Open from AppIntents (excluded file),
-        //   %@ and %d %@ (format-only), CFBundleDisplayName (plist key),
-        //   Shortcuts from AppShortcuts (excluded file)
-        let sources = rows.map(\.source)
-        assert(count == 2, "FAIL: exclusion filter expected 2 rows, got \(count). Sources: \(sources)")
-        assert(sources.contains("Camera"), "FAIL: Camera should be kept")
-        assert(sources.contains("Done"), "FAIL: Done should be kept")
-        assert(!sources.contains("CFBundleName"), "FAIL: CFBundleName should be filtered")
-        assert(!sources.contains("NSHumanReadableCopyright"), "FAIL: plist copyright should be filtered")
-        assert(!sources.contains("Settings"), "FAIL: InfoPlist.loctable should be filtered")
-        assert(!sources.contains("%@"), "FAIL: format-only should be filtered")
-        print("[PASS] Parser exclusion filters (\(count) rows kept, 8 filtered)")
     }
 
     private func testDedupPriority() throws {
@@ -844,5 +726,187 @@ struct SelftestCommand: AsyncParsableCommand {
         }
 
         print("[PASS] Internal entry filter ([Internal] prefix hidden by default)")
+    }
+
+    private func testJSONParser() throws {
+        let tmpDir = "/tmp/apple-loc-json-parser-test"
+        try? FileManager.default.removeItem(atPath: tmpDir)
+        defer { try? FileManager.default.removeItem(atPath: tmpDir) }
+
+        // Create directory structure: data/ios/26.1/
+        let versionDir = (tmpDir as NSString)
+            .appendingPathComponent("ios")
+            .appending("/26.1")
+        try FileManager.default.createDirectory(atPath: versionDir, withIntermediateDirectories: true)
+
+        // Create test JSON file
+        let jsonContent = """
+        {
+            "framework": "UIKitCore.framework",
+            "localizations": {
+                "Camera": [
+                    {"language": "ja", "target": "カメラ", "filename": "Localizable.loctable"},
+                    {"language": "en", "target": "Camera", "filename": "Localizable.loctable"},
+                    {"language": "de", "target": "Kamera", "filename": "Localizable.loctable"}
+                ],
+                "Done": [
+                    {"language": "ja", "target": "完了", "filename": "Localizable.loctable"},
+                    {"language": "en", "target": "Done", "filename": "Localizable.loctable"}
+                ],
+                "D1K-K5-gc3.title": [
+                    {"language": "ja", "target": "あ", "filename": "Main.strings"}
+                ],
+                "CFBundleName": [
+                    {"language": "en", "target": "UIKit", "filename": "InfoPlist.strings"}
+                ],
+                "%@": [
+                    {"language": "ja", "target": "%@", "filename": "Localizable.loctable"}
+                ],
+                "Settings": [
+                    {"language": "en", "target": "Settings", "filename": "AppIntents.strings"}
+                ]
+            }
+        }
+        """
+        let filePath = (versionDir as NSString).appendingPathComponent("UIKitCore.framework_Localizable.loctable_1.json")
+        try jsonContent.write(toFile: filePath, atomically: true, encoding: .utf8)
+
+        // Parse with language filter (ja, en)
+        let parser = JSONDataParser(
+            dataDir: tmpDir,
+            allowedLanguages: Set(["ja", "en"]),
+            allowedPlatforms: nil
+        )
+
+        var allRows: [ParsedRow] = []
+        _ = try parser.parse { batch in
+            allRows.append(contentsOf: batch)
+        }
+
+        // Should include: Camera(ja), Camera(en), Done(ja), Done(en)
+        // Should filter: de (language), IB key, CFBundleName (plist), %@ (format-only), AppIntents (excluded file)
+        let sources = allRows.map { "\($0.source):\($0.language)" }.sorted()
+        assert(allRows.count == 4, "FAIL: JSON parser expected 4 rows, got \(allRows.count). Sources: \(sources)")
+        assert(sources.contains("Camera:en"), "FAIL: should contain Camera:en")
+        assert(sources.contains("Camera:ja"), "FAIL: should contain Camera:ja")
+        assert(sources.contains("Done:en"), "FAIL: should contain Done:en")
+        assert(sources.contains("Done:ja"), "FAIL: should contain Done:ja")
+
+        // Verify platform and bundle
+        assert(allRows[0].platform == "ios26", "FAIL: platform should be ios26, got \(allRows[0].platform)")
+        assert(allRows[0].bundleName == "UIKitCore.framework", "FAIL: bundle should be UIKitCore.framework")
+
+        // Verify no group_id or id
+        assert(allRows[0].groupId == nil, "FAIL: JSON rows should have nil groupId")
+        assert(allRows[0].id == nil, "FAIL: JSON rows should have nil id")
+
+        print("[PASS] JSON parser (\(allRows.count) rows, filters working)")
+    }
+
+    private func testPlatformConversion() throws {
+        assert(JSONDataParser.platformName(os: "ios", version: "26.1") == "ios26",
+               "FAIL: ios/26.1 → ios26")
+        assert(JSONDataParser.platformName(os: "macos", version: "15.6") == "macos15",
+               "FAIL: macos/15.6 → macos15")
+        assert(JSONDataParser.platformName(os: "ios", version: "15.7") == "ios15",
+               "FAIL: ios/15.7 → ios15")
+        assert(JSONDataParser.platformName(os: "macos", version: "12.6") == "macos12",
+               "FAIL: macos/12.6 → macos12")
+        assert(JSONDataParser.platformName(os: "macos", version: "13.5.2") == "macos13",
+               "FAIL: macos/13.5.2 → macos13")
+
+        print("[PASS] Platform name conversion")
+    }
+
+    private func testStructuredTargetResolution() throws {
+        // NSStringDeviceSpecificRuleType → "other" value
+        let deviceJSON = #"{"NSStringDeviceSpecificRuleType":{"iphone":"Aceptar","mac":"Aceptar","other":"OK"}}"#
+        let deviceResult = StructuredTarget.resolveForEmbedding(deviceJSON)
+        assert(deviceResult == "OK", "FAIL: device-specific should resolve to 'other', got '\(deviceResult)'")
+
+        // NSStringDeviceSpecificRuleType without "other" → first value
+        let noOther = #"{"NSStringDeviceSpecificRuleType":{"mac":"Aceptar","iphone":"Aceptar"}}"#
+        let noOtherResult = StructuredTarget.resolveForEmbedding(noOther)
+        assert(!noOtherResult.contains("{"), "FAIL: device-specific without 'other' should resolve to a value, got '\(noOtherResult)'")
+
+        // NSStringLocalizedFormatKey (simple, no %#@ variables)
+        let simpleFormat = #"{"NSStringLocalizedFormatKey":"Done"}"#
+        let simpleResult = StructuredTarget.resolveForEmbedding(simpleFormat)
+        assert(simpleResult == "Done", "FAIL: simple format key should return 'Done', got '\(simpleResult)'")
+
+        // NSStringLocalizedFormatKey (complex, with %#@var@ reference)
+        let complexFormat = #"{"NSStringLocalizedFormatKey":"%#@count@ items","count":{"one":"1","other":"many"}}"#
+        let complexResult = StructuredTarget.resolveForEmbedding(complexFormat)
+        assert(complexResult == "many items", "FAIL: complex format key should resolve variables, got '\(complexResult)'")
+
+        // NSStringVariableWidthRuleType → largest numeric key
+        let widthJSON = #"{"NSStringVariableWidthRuleType":{"1":"OK","25":"Accept","50":"Accept Changes"}}"#
+        let widthResult = StructuredTarget.resolveForEmbedding(widthJSON)
+        assert(widthResult == "Accept Changes", "FAIL: variable-width should pick largest key, got '\(widthResult)'")
+
+        // Plain text → returned as-is
+        let plain = "Hello World"
+        assert(StructuredTarget.resolveForEmbedding(plain) == plain, "FAIL: plain text should pass through")
+
+        // Invalid JSON starting with { → returned as-is
+        let badJSON = "{not valid json"
+        assert(StructuredTarget.resolveForEmbedding(badJSON) == badJSON, "FAIL: invalid JSON should pass through")
+
+        // parseAsJSON: structured → dict, plain → nil
+        assert(StructuredTarget.parseAsJSON(deviceJSON) != nil, "FAIL: parseAsJSON should return dict for structured target")
+        assert(StructuredTarget.parseAsJSON(plain) == nil, "FAIL: parseAsJSON should return nil for plain text")
+
+        print("[PASS] Structured target resolution")
+    }
+
+    private func testStructuredTargetOutput() throws {
+        let path = "/tmp/apple-loc-structured-output-test.db"
+        try? FileManager.default.removeItem(atPath: path)
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let dbQueue = try DatabaseManager.openDatabase(at: path, create: true)
+        try DatabaseManager.createSchema(in: dbQueue)
+
+        try dbQueue.writeWithoutTransaction { db in
+            // Insert a source with structured target for es, plain for ja
+            try db.execute(
+                sql: "INSERT INTO source_strings(source, bundle_name, bundle_priority, file_name, platform) VALUES (?,?,?,?,?)",
+                arguments: ["Done", "UIKit.framework", 1, "L.strings", "ios26"]
+            )
+            let sid = db.lastInsertedRowID
+            try db.execute(
+                sql: "INSERT INTO translations(source_id, language, target) VALUES (?,?,?)",
+                arguments: [sid, "ja", "完了"]
+            )
+            let structuredES = #"{"NSStringDeviceSpecificRuleType":{"mac":"Aceptar","other":"OK"}}"#
+            try db.execute(
+                sql: "INSERT INTO translations(source_id, language, target) VALUES (?,?,?)",
+                arguments: [sid, "es", structuredES]
+            )
+        }
+
+        // Build a SearchResult and verify printJSON output
+        let result = SearchResult(
+            source: "Done",
+            bundleName: "UIKit.framework",
+            fileName: "L.strings",
+            platform: "ios26",
+            translations: [
+                "ja": "完了",
+                "es": #"{"NSStringDeviceSpecificRuleType":{"mac":"Aceptar","other":"OK"}}"#,
+            ]
+        )
+        let output = ResultsOutput(results: [result])
+
+        // Test the actual buildJSONData() code path (same logic as printJSON)
+        let data = try output.buildJSONData()
+        let jsonString = String(data: data, encoding: .utf8)!
+
+        // Verify: ja should be a plain string, es should be a nested object
+        assert(jsonString.contains("\"ja\" : \"完了\""), "FAIL: ja should be plain string in output")
+        assert(jsonString.contains("\"NSStringDeviceSpecificRuleType\""), "FAIL: es should contain nested structure key")
+        assert(!jsonString.contains("\\\"NSStringDeviceSpecificRuleType"), "FAIL: structured target should not be escaped")
+
+        print("[PASS] Structured target output")
     }
 }

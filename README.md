@@ -12,10 +12,10 @@ swift build -c release
 mkdir -p ~/.local/bin
 ln -sf "$(swift build -c release --show-bin-path)/apple-loc" ~/.local/bin/apple-loc
 
-# Download localization data (~30 GB)
-git clone https://github.com/kishikawakatsumi/applelocalization-data.git
+# Download localization data (~28 GB)
+git clone https://github.com/kishikawakatsumi/applelocalization-tools.git
 
-apple-loc ingest --data-dir ./applelocalization-data --platform macos26,ios26
+apple-loc ingest --data-dir ./applelocalization-tools --platform macos26,ios26
 ```
 
 > **Note:** Embedding computation takes time. Use `--embed none` for a faster ingest without semantic search, or limit languages with `--embed en` to reduce the scope.
@@ -28,23 +28,23 @@ Import translation data and build the search database.
 
 ```bash
 # Basic: latest iOS, English + Japanese semantic search
-apple-loc ingest --data-dir ./applelocalization-data --platform ios26 --embed en,ja
+apple-loc ingest --data-dir ./applelocalization-tools --platform ios26 --embed en,ja
 
 # Specific languages only
-apple-loc ingest --data-dir ./applelocalization-data --langs en,en_AU,en_GB,es_US,fr,fr_CA,de,it,ja,es,es_419 --platform ios26
+apple-loc ingest --data-dir ./applelocalization-tools --langs en,en_AU,en_GB,es_US,fr,fr_CA,de,it,ja,es,es_419 --platform ios26
 
 # Multiple platforms
-apple-loc ingest --data-dir ./applelocalization-data --platform macos26,ios26
+apple-loc ingest --data-dir ./applelocalization-tools --platform macos26,ios26
 
 # Re-ingest with different settings
-apple-loc ingest --data-dir ./applelocalization-data --platform ios26 --embed en,ja --force
+apple-loc ingest --data-dir ./applelocalization-tools --platform ios26 --embed en,ja --force
 ```
 
 **Options:**
 
 | Option | Description |
 |---|---|
-| `--data-dir` | Directory containing `data.sql.*` files (required) |
+| `--data-dir` | Directory containing JSON data files (required) |
 | `--platform` | Platform filter, e.g. `ios26`, `macos26` (default: all) |
 | `--langs` | Language codes to import, e.g. `en,ja,fr` (default: all) |
 | `--embed` | Languages for semantic search: `en` (default), `ja,en`, or `none` |
@@ -66,7 +66,7 @@ Language variants like `es_419`, `fr_CA`, `zh_HK` are supported — embedding au
 
 ```bash
 # 8 workers × 2 languages = 16 total (OK on 16-core machine)
-apple-loc ingest --data-dir ./applelocalization-data --embed en,ja --concurrency 8 --force
+apple-loc ingest --data-dir ./applelocalization-tools --embed en,ja --concurrency 8 --force
 ```
 
 ### search
@@ -156,4 +156,4 @@ cp -r apple-loc-skill ~/.claude/skills/apple-loc
 
 ## Thanks
 
-Built on [kishikawakatsumi/applelocalization-data](https://github.com/kishikawakatsumi/applelocalization-data). If you're looking for a web-based search, check out [applelocalization.com](https://applelocalization.com/).
+Built on [kishikawakatsumi/applelocalization-tools](https://github.com/kishikawakatsumi/applelocalization-tools). If you're looking for a web-based search, check out [applelocalization.com](https://applelocalization.com/).

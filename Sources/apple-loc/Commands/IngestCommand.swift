@@ -6,10 +6,10 @@ import NaturalLanguage
 struct IngestCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "ingest",
-        abstract: "Ingest Apple localization data from PostgreSQL dump files."
+        abstract: "Ingest Apple localization data from JSON files."
     )
 
-    @Option(name: .long, help: "Directory containing data.sql.* files.")
+    @Option(name: .long, help: "Directory containing JSON data files.")
     var dataDir: String
 
     @Option(name: .long, help: "Comma-separated language codes to import. Omit to import all languages.")
@@ -113,15 +113,8 @@ struct IngestCommand: AsyncParsableCommand {
             ? "Appending to database at \(dbPath)"
             : "Database created at \(dbPath)\(effectiveCompact ? " (compact mode)" : "")")
 
-        // Parse and ingest
-        var parser = SQLDumpParser(
-            dataDir: dataDir,
-            allowedLanguages: langCodes.map { Set($0.flatMap(\.languageCodeVariants)) },
-            allowedPlatforms: platform.map { Set($0.commaSeparated) }
-        )
-        parser.onTableFound = { table, processing in
-            logStderr("  \(processing ? "▶" : "⏭") \(table)")
-        }
+        let allowedLangSet = langCodes.map { Set($0.flatMap(\.languageCodeVariants)) }
+        let allowedPlatformSet = platform.map { Set($0.commaSeparated) }
 
         let startTime = ContinuousClock.now
         var batch: [ParsedRow] = []
@@ -129,15 +122,17 @@ struct IngestCommand: AsyncParsableCommand {
         var stats = IngestStats()
         var dedupCache = DedupCache()
 
-        _ = try parser.parse { row in
-            batch.append(row)
+        let jsonParser = JSONDataParser(
+            dataDir: JSONDataParser.resolveDataDir(dataDir),
+            allowedLanguages: allowedLangSet,
+            allowedPlatforms: allowedPlatformSet
+        )
+        _ = try jsonParser.parse { fileBatch in
+            batch.append(contentsOf: fileBatch)
             if batch.count >= batchSize {
                 try processBatch(batch, into: dbQueue, pool: pool, stats: &stats, dedupCache: &dedupCache, compact: effectiveCompact)
                 batch.removeAll(keepingCapacity: true)
-
-                let elapsed = ContinuousClock.now - startTime
-                let secs = elapsed.seconds
-                logStderr("\r  \(stats.totalRows) rows, \(stats.sources) sources, \(stats.vectors) vectors | \(formatRate(stats.totalRows, secs)) rows/s | \(formatTime(secs))", terminator: "")
+                printProgress(stats: stats, since: startTime)
             }
         }
 
@@ -230,6 +225,14 @@ struct IngestCommand: AsyncParsableCommand {
         var vectors = 0
     }
 
+    // MARK: - Progress
+
+    private func printProgress(stats: IngestStats, since startTime: ContinuousClock.Instant) {
+        let elapsed = ContinuousClock.now - startTime
+        let secs = elapsed.seconds
+        logStderr("\r  \(stats.totalRows) rows, \(stats.sources) sources, \(stats.vectors) vectors | \(formatRate(stats.totalRows, secs)) rows/s | \(formatTime(secs))", terminator: "")
+    }
+
     // MARK: - Batch Processing
 
     private func processBatch(
@@ -318,7 +321,8 @@ struct IngestCommand: AsyncParsableCommand {
                 }
                 // Find translation in this language within the batch entry
                 if let trans = p.entry.translations.first(where: { $0.language == lang }) {
-                    embeddingTargets.append(EmbedTarget(key: p.key, language: lang, text: trans.target.lowercased()))
+                    let resolved = StructuredTarget.resolveForEmbedding(trans.target)
+                    embeddingTargets.append(EmbedTarget(key: p.key, language: lang, text: resolved.lowercased()))
                 }
             }
         }
