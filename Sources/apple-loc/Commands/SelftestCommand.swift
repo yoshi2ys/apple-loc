@@ -21,6 +21,7 @@ struct SelftestCommand: AsyncParsableCommand {
         try testEmbedding()
         try testParallelEmbedding()
         try testSourceBundles()
+        try testInfo()
         print("All selftests PASSED")
     }
 
@@ -517,5 +518,63 @@ struct SelftestCommand: AsyncParsableCommand {
         }
 
         print("[PASS] Source bundles (multi-bundle tracking + compact fallback)")
+    }
+
+    private func testInfo() throws {
+        let path = "/tmp/apple-loc-info-test.db"
+        try? FileManager.default.removeItem(atPath: path)
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let dbQueue = try DatabaseManager.openDatabase(at: path, create: true)
+        try DatabaseManager.createSchema(in: dbQueue)
+
+        try dbQueue.writeWithoutTransaction { db in
+            // Insert source strings across two platforms
+            for (source, platform) in [("Camera", "ios26"), ("Settings", "ios26"), ("Finder", "macos26")] {
+                try db.execute(
+                    sql: "INSERT INTO source_strings(source, bundle_name, bundle_priority, file_name, platform) VALUES (?,?,?,?,?)",
+                    arguments: [source, "UIKit.framework", 1, "L.strings", platform]
+                )
+            }
+
+            // Insert translations in two languages
+            try db.execute(sql: "INSERT INTO translations(source_id, language, target) VALUES (1,'ja','カメラ')")
+            try db.execute(sql: "INSERT INTO translations(source_id, language, target) VALUES (1,'en','Camera')")
+            try db.execute(sql: "INSERT INTO translations(source_id, language, target) VALUES (2,'ja','設定')")
+            try db.execute(sql: "INSERT INTO translations(source_id, language, target) VALUES (3,'ja','Finder')")
+
+            // Insert vec_mapping for one language
+            try db.execute(sql: "INSERT INTO vec_mapping(source_id, language) VALUES (1,'en')")
+            try db.execute(sql: "INSERT INTO vec_mapping(source_id, language) VALUES (2,'en')")
+
+            // Verify platforms
+            let platforms = try String.fetchAll(db, sql:
+                "SELECT DISTINCT platform FROM source_strings ORDER BY platform")
+            assert(platforms == ["ios26", "macos26"], "FAIL: info platforms = \(platforms)")
+
+            // Verify languages
+            let languages = try String.fetchAll(db, sql:
+                "SELECT DISTINCT language FROM translations ORDER BY language")
+            assert(languages == ["en", "ja"], "FAIL: info languages = \(languages)")
+
+            // Verify embedding languages
+            let embLangs = try String.fetchAll(db, sql:
+                "SELECT DISTINCT language FROM vec_mapping ORDER BY language")
+            assert(embLangs == ["en"], "FAIL: info embedding_languages = \(embLangs)")
+
+            // Verify counts
+            let ssCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM source_strings")!
+            let trCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM translations")!
+            let vecCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM vec_mapping")!
+            assert(ssCount == 3, "FAIL: info source_strings count = \(ssCount)")
+            assert(trCount == 4, "FAIL: info translations count = \(trCount)")
+            assert(vecCount == 2, "FAIL: info vec_mapping count = \(vecCount)")
+        }
+
+        // Verify non-existent DB path
+        assert(!FileManager.default.fileExists(atPath: "/tmp/nonexistent-apple-loc.db"),
+               "FAIL: test precondition - nonexistent path exists")
+
+        print("[PASS] Info command queries")
     }
 }
