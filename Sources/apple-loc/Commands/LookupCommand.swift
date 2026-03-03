@@ -51,15 +51,17 @@ struct LookupCommand: AsyncParsableCommand {
         let langFilter = lang.map { $0.normalizedLanguageSet }
 
         let results: [SearchResult] = try await dbQueue.read { db in
-            let sourceIds: [Int64]
+            let lookupResults: [LookupResult]
 
             if let key = key {
-                sourceIds = try lookupByKey(key, in: db)
+                lookupResults = try lookupByKey(key, in: db)
             } else {
-                sourceIds = try lookupByTarget(target!, in: db)
+                lookupResults = try lookupByTarget(target!, in: db)
             }
 
-            let candidates = sourceIds.map { ResultFetcher.Candidate(sourceId: $0, distance: nil) }
+            let candidates = lookupResults.map {
+                ResultFetcher.Candidate(sourceId: $0.id, distance: $0.matchRank)
+            }
             return try ResultFetcher.fetch(
                 candidates: candidates,
                 in: db,
@@ -71,7 +73,11 @@ struct LookupCommand: AsyncParsableCommand {
             )
         }
 
+        // Sort: match relevance first, then bundle priority, then alphabetical
         let sorted = results.sorted { a, b in
+            let da = a.distance ?? Double.greatestFiniteMagnitude
+            let db = b.distance ?? Double.greatestFiniteMagnitude
+            if da != db { return da < db }
             let pa = BundlePriority.from(bundleName: a.bundleName)
             let pb = BundlePriority.from(bundleName: b.bundleName)
             return pa != pb ? pa < pb : a.source < b.source
@@ -81,13 +87,43 @@ struct LookupCommand: AsyncParsableCommand {
 
     // MARK: - Private
 
+    private typealias LookupResult = (id: Int64, matchRank: Double?)
+
     /// Search by source key (exact or LIKE)
-    private func lookupByKey(_ key: String, in db: Database) throws -> [Int64] {
-        let effectiveKey = fuzzy ? "%\(key)%" : key
-        let useLike = effectiveKey.contains("%")
+    private func lookupByKey(_ key: String, in db: Database) throws -> [LookupResult] {
+        if fuzzy {
+            // Ranked fuzzy: exact(0) > prefix(1) > substring(2)
+            var sql = """
+                SELECT id,
+                  CASE
+                    WHEN source = ? THEN 0.0
+                    WHEN source LIKE ? THEN 1.0
+                    ELSE 2.0
+                  END AS match_rank
+                FROM source_strings
+                WHERE source LIKE ?
+                """
+            var args: [any DatabaseValueConvertible] = [key, "\(key)%", "%\(key)%"]
+
+            if !includeInternal {
+                sql += " AND source NOT LIKE '[Internal]%'"
+            }
+            if let p = platform {
+                sql += " AND platform = ?"
+                args.append(p)
+            }
+            sql += " ORDER BY match_rank, source LIMIT ?"
+            args.append(limit)
+
+            return try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
+                .map { ($0["id"] as Int64, $0["match_rank"] as Double?) }
+        }
+
+        // Non-fuzzy: exact match or user-provided wildcards
+        let useLike = key.contains("%")
         var sql = "SELECT id FROM source_strings WHERE "
         sql += useLike ? "source LIKE ?" : "source = ?"
-        var args: [any DatabaseValueConvertible] = [effectiveKey]
+        var args: [any DatabaseValueConvertible] = [key]
 
         if !includeInternal {
             sql += " AND source NOT LIKE '[Internal]%'"
@@ -99,20 +135,50 @@ struct LookupCommand: AsyncParsableCommand {
         sql += " LIMIT ?"
         args.append(limit)
 
-        return try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args)).map { $0["id"] }
+        return try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
+            .map { ($0["id"] as Int64, nil as Double?) }
     }
 
     /// Reverse lookup by target text
-    private func lookupByTarget(_ target: String, in db: Database) throws -> [Int64] {
-        let effectiveTarget = fuzzy ? "%\(target)%" : target
-        let useLike = effectiveTarget.contains("%")
+    private func lookupByTarget(_ target: String, in db: Database) throws -> [LookupResult] {
+        if fuzzy {
+            // Ranked fuzzy: exact(0) > prefix(1) > substring(2)
+            var sql = """
+                SELECT t.source_id AS id,
+                  MIN(CASE
+                    WHEN t.target = ? THEN 0.0
+                    WHEN t.target LIKE ? THEN 1.0
+                    ELSE 2.0
+                  END) AS match_rank
+                FROM translations t
+                JOIN source_strings ss ON ss.id = t.source_id
+                WHERE t.target LIKE ?
+                """
+            var args: [any DatabaseValueConvertible] = [target, "\(target)%", "%\(target)%"]
+
+            if !includeInternal {
+                sql += " AND ss.source NOT LIKE '[Internal]%'"
+            }
+            if let p = platform {
+                sql += " AND ss.platform = ?"
+                args.append(p)
+            }
+            sql += " GROUP BY t.source_id ORDER BY match_rank LIMIT ?"
+            args.append(limit)
+
+            return try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
+                .map { ($0["id"] as Int64, $0["match_rank"] as Double?) }
+        }
+
+        // Non-fuzzy: exact match or user-provided wildcards
+        let useLike = target.contains("%")
         var sql = """
             SELECT DISTINCT t.source_id FROM translations t
             JOIN source_strings ss ON ss.id = t.source_id
             WHERE
         """
         sql += useLike ? " t.target LIKE ?" : " t.target = ?"
-        var args: [any DatabaseValueConvertible] = [effectiveTarget]
+        var args: [any DatabaseValueConvertible] = [target]
 
         if !includeInternal {
             sql += " AND ss.source NOT LIKE '[Internal]%'"
@@ -124,6 +190,7 @@ struct LookupCommand: AsyncParsableCommand {
         sql += " LIMIT ?"
         args.append(limit)
 
-        return try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args)).map { $0["source_id"] }
+        return try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
+            .map { ($0["source_id"] as Int64, nil as Double?) }
     }
 }

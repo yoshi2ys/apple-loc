@@ -209,8 +209,27 @@ struct SelftestCommand: AsyncParsableCommand {
             let ciSources = ciRows.map { $0["source"] as String }
             assert(ciSources.contains("TAB_HOME"), "FAIL: case-insensitive fuzzy should find TAB_HOME")
             assert(ciSources.count == 3, "FAIL: case-insensitive fuzzy should find 3 results, got \(ciSources.count)")
+
+            // Ranked fuzzy: exact match should sort first
+            let rankedRows = try Row.fetchAll(db, sql: """
+                SELECT source,
+                  CASE
+                    WHEN source = ?1 THEN 0.0
+                    WHEN source LIKE ?2 THEN 1.0
+                    ELSE 2.0
+                  END AS match_rank
+                FROM source_strings
+                WHERE source LIKE ?3
+                ORDER BY match_rank, source
+                LIMIT 10
+            """, arguments: ["Home", "Home%", "%Home%"])
+            let rankedSources = rankedRows.map { $0["source"] as String }
+            assert(rankedSources.first == "Home",
+                   "FAIL: exact match 'Home' should be first, got \(rankedSources.first ?? "nil")")
+            assert(rankedSources[1] == "HomeScreen",
+                   "FAIL: prefix match 'HomeScreen' should be second, got \(rankedSources[1])")
         }
-        print("[PASS] Fuzzy lookup (substring matching via LIKE)")
+        print("[PASS] Fuzzy lookup (substring matching via LIKE, ranked ordering)")
     }
 
     private func testDedupPriority() throws {
