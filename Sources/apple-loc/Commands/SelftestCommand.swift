@@ -28,6 +28,7 @@ struct SelftestCommand: AsyncParsableCommand {
         try testStructuredTargetResolution()
         try testStructuredTargetOutput()
         try testEmbedTierClassifier()
+        try testPagination()
         print("All selftests PASSED")
     }
 
@@ -377,7 +378,7 @@ struct SelftestCommand: AsyncParsableCommand {
                 frameworkFilter: "Photos",
                 platformFilter: nil,
                 limit: 10
-            )
+            ).results
             assert(photosResults.count == 1, "FAIL: --framework Photos should match via source_bundles")
             assert(photosResults[0].bundles != nil, "FAIL: bundles should be populated")
             assert(photosResults[0].bundles!.contains("Photos.framework"), "FAIL: bundles should include Photos.framework")
@@ -391,7 +392,7 @@ struct SelftestCommand: AsyncParsableCommand {
                 frameworkFilter: "Nonexistent",
                 platformFilter: nil,
                 limit: 10
-            )
+            ).results
             assert(noResults.isEmpty, "FAIL: --framework Nonexistent should match nothing")
         }
 
@@ -425,7 +426,7 @@ struct SelftestCommand: AsyncParsableCommand {
                 frameworkFilter: "UIKit",
                 platformFilter: nil,
                 limit: 10
-            )
+            ).results
             assert(fallbackResults.count == 1, "FAIL: compact fallback should match primary bundle_name")
             assert(fallbackResults[0].bundles == nil, "FAIL: compact mode should have nil bundles")
         }
@@ -735,7 +736,7 @@ struct SelftestCommand: AsyncParsableCommand {
                 platformFilter: nil,
                 limit: 10,
                 includeInternal: false
-            )
+            ).results
             assert(filtered.count == 1, "FAIL: internal filter should return 1, got \(filtered.count)")
             assert(filtered[0].source == "Camera", "FAIL: filtered result should be Camera")
 
@@ -748,7 +749,7 @@ struct SelftestCommand: AsyncParsableCommand {
                 platformFilter: nil,
                 limit: 10,
                 includeInternal: true
-            )
+            ).results
             assert(unfiltered.count == 2, "FAIL: unfiltered should return 2, got \(unfiltered.count)")
         }
 
@@ -923,7 +924,7 @@ struct SelftestCommand: AsyncParsableCommand {
                 "es": #"{"NSStringDeviceSpecificRuleType":{"mac":"Aceptar","other":"OK"}}"#,
             ]
         )
-        let output = ResultsOutput(results: [result])
+        let output = ResultsOutput(results: [result], hasMore: false)
 
         // Test the actual buildJSONData() code path (same logic as printJSON)
         let data = try output.buildJSONData()
@@ -975,5 +976,84 @@ struct SelftestCommand: AsyncParsableCommand {
         assert(EmbedTierClassifier.isExcluded("RandomThing.framework") == false, "FAIL: unknown should not be excluded")
 
         print("[PASS] Embed tier classifier")
+    }
+
+    private func testPagination() throws {
+        let path = "/tmp/apple-loc-pagination-test.db"
+        try? FileManager.default.removeItem(atPath: path)
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let dbQueue = try DatabaseManager.openDatabase(at: path, create: true)
+        try DatabaseManager.createSchema(in: dbQueue)
+
+        // Insert 5 source strings with translations
+        try dbQueue.writeWithoutTransaction { db in
+            for i in 1...5 {
+                try db.execute(
+                    sql: "INSERT INTO source_strings(source, bundle_name, bundle_priority, file_name, platform) VALUES (?,?,?,?,?)",
+                    arguments: ["Item\(i)", "Test.framework", 1, "Test.strings", "ios26"]
+                )
+                let sid = db.lastInsertedRowID
+                try db.execute(
+                    sql: "INSERT INTO translations(source_id, language, target) VALUES (?,?,?)",
+                    arguments: [sid, "en", "Item \(i)"]
+                )
+            }
+
+            let candidates = (1...5).map { ResultFetcher.Candidate(sourceId: Int64($0), distance: nil) }
+
+            // Page 1: offset=0, limit=2 → 2 results, hasMore=true
+            let page1 = try ResultFetcher.fetch(
+                candidates: candidates, in: db,
+                langFilter: nil, frameworkFilter: nil, platformFilter: nil,
+                limit: 2, offset: 0
+            )
+            assert(page1.results.count == 2, "FAIL: page1 should have 2 results, got \(page1.results.count)")
+            assert(page1.hasMore == true, "FAIL: page1 hasMore should be true")
+
+            // Page 2: offset=2, limit=2 → 2 results, hasMore=true
+            let page2 = try ResultFetcher.fetch(
+                candidates: candidates, in: db,
+                langFilter: nil, frameworkFilter: nil, platformFilter: nil,
+                limit: 2, offset: 2
+            )
+            assert(page2.results.count == 2, "FAIL: page2 should have 2 results, got \(page2.results.count)")
+            assert(page2.hasMore == true, "FAIL: page2 hasMore should be true")
+
+            // Page 3: offset=4, limit=2 → 1 result, hasMore=false
+            let page3 = try ResultFetcher.fetch(
+                candidates: candidates, in: db,
+                langFilter: nil, frameworkFilter: nil, platformFilter: nil,
+                limit: 2, offset: 4
+            )
+            assert(page3.results.count == 1, "FAIL: page3 should have 1 result, got \(page3.results.count)")
+            assert(page3.hasMore == false, "FAIL: page3 hasMore should be false")
+
+            // Beyond data: offset=5, limit=2 → 0 results, hasMore=false
+            let beyond = try ResultFetcher.fetch(
+                candidates: candidates, in: db,
+                langFilter: nil, frameworkFilter: nil, platformFilter: nil,
+                limit: 2, offset: 5
+            )
+            assert(beyond.results.count == 0, "FAIL: beyond should have 0 results, got \(beyond.results.count)")
+            assert(beyond.hasMore == false, "FAIL: beyond hasMore should be false")
+
+            // Large limit: offset=0, limit=10 → 5 results, hasMore=false
+            let all = try ResultFetcher.fetch(
+                candidates: candidates, in: db,
+                langFilter: nil, frameworkFilter: nil, platformFilter: nil,
+                limit: 10, offset: 0
+            )
+            assert(all.results.count == 5, "FAIL: all should have 5 results, got \(all.results.count)")
+            assert(all.hasMore == false, "FAIL: all hasMore should be false")
+
+            // Verify has_more appears in JSON output
+            let output = ResultsOutput(results: page1.results, hasMore: true)
+            let data = try output.buildJSONData()
+            let json = String(data: data, encoding: .utf8)!
+            assert(json.contains("\"has_more\" : true"), "FAIL: JSON should contain has_more")
+        }
+
+        print("[PASS] Pagination (offset + has_more)")
     }
 }

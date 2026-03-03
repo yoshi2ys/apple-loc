@@ -20,6 +20,12 @@ struct SearchResult: Codable, Sendable {
 /// Wrapper for JSON output.
 struct ResultsOutput: Codable, Sendable {
     var results: [SearchResult]
+    var hasMore: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case results
+        case hasMore = "has_more"
+    }
 }
 
 extension ResultsOutput {
@@ -47,7 +53,7 @@ extension ResultsOutput {
             return dict
         }
 
-        let output: [String: Any] = ["results": resultsArray]
+        let output: [String: Any] = ["has_more": hasMore, "results": resultsArray]
         return try JSONSerialization.data(withJSONObject: output, options: [.prettyPrinted, .sortedKeys])
     }
 
