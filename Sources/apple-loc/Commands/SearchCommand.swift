@@ -180,7 +180,14 @@ struct SearchCommand: AsyncParsableCommand {
             )
         }
 
-        try ResultsOutput(results: results).printJSON()
+        let sorted = results.sorted { a, b in
+            let da = a.distance ?? Double.greatestFiniteMagnitude
+            let db = b.distance ?? Double.greatestFiniteMagnitude
+            if da != db { return da < db }
+            return BundlePriority.from(bundleName: a.bundleName)
+                < BundlePriority.from(bundleName: b.bundleName)
+        }
+        try ResultsOutput(results: sorted).printJSON()
     }
 
 }

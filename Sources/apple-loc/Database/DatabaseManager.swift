@@ -35,7 +35,7 @@ enum DatabaseManager {
                     group_id INTEGER,
                     source TEXT NOT NULL,
                     bundle_name TEXT NOT NULL,
-                    bundle_priority INTEGER NOT NULL DEFAULT 5,
+                    bundle_priority INTEGER NOT NULL DEFAULT 7,
                     file_name TEXT,
                     platform TEXT NOT NULL,
                     UNIQUE(source, platform)

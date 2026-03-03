@@ -1,43 +1,43 @@
 import Foundation
 
-/// Bundle priority tiers for source-text deduplication.
+/// Bundle priority tiers for source-text deduplication and display ordering.
 /// Lower raw value = higher priority. When multiple bundles contribute the same
 /// source text on a platform, the highest-priority bundle wins.
 enum BundlePriority: Int, Comparable, Sendable {
-    case coreFramework  = 1   // Foundation, UIKit, AppKit, SwiftUI, CoreFoundation
-    case framework      = 2   // Other .framework bundles
-    case app            = 3   // .app bundles
-    case plugin         = 4   // .appex, .bundle, .pluginkit
-    case other          = 5   // Everything else
+    case tier1     = 1  // EmbedTier T1 (Foundation, AppKit, UIKitCore, SwiftUI, etc.)
+    case tier2     = 2  // EmbedTier T2 (Photos, Calendar, Safari, etc.)
+    case tier3     = 3  // EmbedTier T3 (Terminal, GameCenter, etc.)
+    case framework = 4  // Unknown .framework
+    case app       = 5  // Unknown .app
+    case plugin    = 6  // .appex, .bundle, .pluginkit
+    case other     = 7  // Everything else
+    case excluded  = 8  // EmbedTier excluded (ImageIO, etc.)
 
     static func < (lhs: BundlePriority, rhs: BundlePriority) -> Bool {
         lhs.rawValue < rhs.rawValue
     }
 
-    private static let coreFrameworks: Set<String> = [
-        "foundation", "uikit", "appkit", "swiftui", "corefoundation",
-        "foundation.framework", "uikit.framework", "appkit.framework",
-        "swiftui.framework", "corefoundation.framework",
-    ]
-
     /// Derive priority from a bundle_name string.
+    /// Delegates to EmbedTierClassifier for curated bundles, then falls back
+    /// to extension-based classification for unknowns.
     static func from(bundleName: String) -> BundlePriority {
+        if let tier = EmbedTierClassifier.classify(bundleName) {
+            switch tier {
+            case 1: return .tier1
+            case 2: return .tier2
+            case 3: return .tier3
+            default: break
+            }
+        } else if EmbedTierClassifier.isExcluded(bundleName) {
+            return .excluded
+        }
+
+        // Extension-based fallback for unknown bundles
         let name = bundleName.lowercased()
-
-        // Tier 1: core frameworks
-        if coreFrameworks.contains(name) { return .coreFramework }
-
-        // Tier 2: any .framework
         if name.hasSuffix(".framework") { return .framework }
-
-        // Tier 3: .app
         if name.hasSuffix(".app") { return .app }
-
-        // Tier 4: plugin-like bundles
         if name.hasSuffix(".appex") || name.hasSuffix(".bundle")
             || name.hasSuffix(".pluginkit") { return .plugin }
-
-        // Tier 5: everything else
         return .other
     }
 }

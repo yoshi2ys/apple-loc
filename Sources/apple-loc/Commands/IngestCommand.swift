@@ -36,6 +36,9 @@ struct IngestCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Embedding mode: \"none\" (skip), \"en\" (English only, default), or comma-separated codes (e.g. \"ja,en\").")
     var embed: EmbedMode = .en
 
+    @Option(name: .long, help: "Embedding tier: 1 (core UI), 2 (+ primary apps, default), 3 (+ extended), or \"all\".")
+    var embedTier: EmbedTier = .upTo(2)
+
     @Flag(name: .long, help: "Skip source_bundles table (saves space, but --framework filter only matches the primary bundle).")
     var compact: Bool = false
 
@@ -164,6 +167,7 @@ struct IngestCommand: AsyncParsableCommand {
             "elapsed_seconds": round(elapsed * 10) / 10,
             "db_path": dbPath,
             "embed_mode": embedModeStr,
+            "embed_tier": embedTier.stringValue,
             "embed_langs": pool.map { Array($0.supportedLanguages.sorted()) } ?? [],
         ]
         let jsonData = try JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys])
@@ -311,6 +315,7 @@ struct IngestCommand: AsyncParsableCommand {
 
         for p in pending {
             guard p.needsUpsert else { continue }
+            guard EmbedTierClassifier.shouldEmbed(p.entry.row.bundleName, tier: embedTier) else { continue }
             let cachedSourceId = dedupCache.entries[p.key]?.sourceId
 
             for lang in embedLangs {

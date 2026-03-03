@@ -20,6 +20,9 @@ struct EmbedCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Batch size for embedding.")
     var batchSize: Int = 1000
 
+    @Option(name: .long, help: "Embedding tier: 1 (core UI), 2 (+ primary apps, default), 3 (+ extended), or \"all\".")
+    var embedTier: EmbedTier = .upTo(2)
+
     @Flag(name: .long, help: "Delete existing embeddings for the specified languages and regenerate.")
     var force: Bool = false
 
@@ -88,19 +91,26 @@ struct EmbedCommand: AsyncParsableCommand {
             while true {
                 // Cursor-based query: fetch translations without embeddings
                 let cursorSnapshot = cursor
-                let batch: [(sourceId: Int64, text: String)] = try await dbQueue.read { db in
+                let rawBatch: [(sourceId: Int64, text: String, bundleName: String)] = try await dbQueue.read { db in
                     try Row.fetchAll(db, sql: """
-                        SELECT t.source_id, t.target FROM translations t
+                        SELECT t.source_id, t.target, ss.bundle_name FROM translations t
+                        INNER JOIN source_strings ss ON ss.id = t.source_id
                         LEFT JOIN vec_mapping vm ON vm.source_id = t.source_id AND vm.language = ?
                         WHERE t.language = ? AND vm.id IS NULL AND t.source_id > ?
                         ORDER BY t.source_id LIMIT ?
                     """, arguments: [dbLang, dbLang, cursorSnapshot, batchSize]).map { row in
-                        (sourceId: row["source_id"] as Int64, text: (row["target"] as String).lowercased())
+                        (sourceId: row["source_id"] as Int64,
+                         text: (row["target"] as String).lowercased(),
+                         bundleName: row["bundle_name"] as String)
                     }
                 }
 
-                if batch.isEmpty { break }
-                cursor = batch.last!.sourceId
+                if rawBatch.isEmpty { break }
+                cursor = rawBatch.last!.sourceId
+
+                // Filter by tier
+                let batch = rawBatch.filter { EmbedTierClassifier.shouldEmbed($0.bundleName, tier: embedTier) }
+                if batch.isEmpty { continue }
 
                 // Generate embeddings
                 let targets = batch.map { (language: lang, text: $0.text) }
@@ -136,6 +146,7 @@ struct EmbedCommand: AsyncParsableCommand {
             "languages": targetLangs,
             "elapsed_seconds": round(elapsed * 10) / 10,
             "db_path": dbPath,
+            "embed_tier": embedTier.stringValue,
         ]
         let jsonData = try JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys])
         print(String(data: jsonData, encoding: .utf8)!)
