@@ -32,6 +32,9 @@ struct LookupCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Maximum number of results.")
     var limit: Int = 20
 
+    @Option(name: .long, help: "Number of results to skip (for pagination).")
+    var offset: Int = 0
+
     @Option(name: .long, help: "SQLite database path.")
     var db: String = DatabaseManager.defaultDBPath
 
@@ -50,7 +53,7 @@ struct LookupCommand: AsyncParsableCommand {
 
         let langFilter = lang.map { $0.normalizedLanguageSet }
 
-        let results: [SearchResult] = try await dbQueue.read { db in
+        let fetchResult: ResultFetcher.FetchResult = try await dbQueue.read { db in
             let lookupResults: [LookupResult]
 
             if let key = key {
@@ -69,12 +72,13 @@ struct LookupCommand: AsyncParsableCommand {
                 frameworkFilter: framework,
                 platformFilter: platform,
                 limit: limit,
+                offset: offset,
                 includeInternal: includeInternal
             )
         }
 
         // Sort: match relevance first, then bundle priority, then alphabetical
-        let sorted = results.sorted { a, b in
+        let sorted = fetchResult.results.sorted { a, b in
             let da = a.distance ?? Double.greatestFiniteMagnitude
             let db = b.distance ?? Double.greatestFiniteMagnitude
             if da != db { return da < db }
@@ -82,7 +86,7 @@ struct LookupCommand: AsyncParsableCommand {
             let pb = BundlePriority.from(bundleName: b.bundleName)
             return pa != pb ? pa < pb : a.source < b.source
         }
-        try ResultsOutput(results: sorted).printJSON()
+        try ResultsOutput(results: sorted, hasMore: fetchResult.hasMore).printJSON()
     }
 
     // MARK: - Private
@@ -91,6 +95,7 @@ struct LookupCommand: AsyncParsableCommand {
 
     /// Search by source key (exact or LIKE)
     private func lookupByKey(_ key: String, in db: Database) throws -> [LookupResult] {
+        let sqlLimit = offset + limit
         if fuzzy {
             // Ranked fuzzy: exact(0) > prefix(1) > substring(2)
             var sql = """
@@ -113,7 +118,7 @@ struct LookupCommand: AsyncParsableCommand {
                 args.append(p)
             }
             sql += " ORDER BY match_rank, source LIMIT ?"
-            args.append(limit)
+            args.append(sqlLimit)
 
             return try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
                 .map { ($0["id"] as Int64, $0["match_rank"] as Double?) }
@@ -133,7 +138,7 @@ struct LookupCommand: AsyncParsableCommand {
             args.append(p)
         }
         sql += " LIMIT ?"
-        args.append(limit)
+        args.append(sqlLimit)
 
         return try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
             .map { ($0["id"] as Int64, nil as Double?) }
@@ -141,6 +146,7 @@ struct LookupCommand: AsyncParsableCommand {
 
     /// Reverse lookup by target text
     private func lookupByTarget(_ target: String, in db: Database) throws -> [LookupResult] {
+        let sqlLimit = offset + limit
         if fuzzy {
             // Ranked fuzzy: exact(0) > prefix(1) > substring(2)
             var sql = """
@@ -164,7 +170,7 @@ struct LookupCommand: AsyncParsableCommand {
                 args.append(p)
             }
             sql += " GROUP BY t.source_id ORDER BY match_rank LIMIT ?"
-            args.append(limit)
+            args.append(sqlLimit)
 
             return try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
                 .map { ($0["id"] as Int64, $0["match_rank"] as Double?) }
@@ -188,7 +194,7 @@ struct LookupCommand: AsyncParsableCommand {
             args.append(p)
         }
         sql += " LIMIT ?"
-        args.append(limit)
+        args.append(sqlLimit)
 
         return try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
             .map { ($0["source_id"] as Int64, nil as Double?) }

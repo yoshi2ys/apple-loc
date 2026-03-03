@@ -140,6 +140,7 @@ apple-loc search "debug" --internal
 | `--query-lang` | Query language override for text search (default: auto-detect) |
 | `--internal` | Include `[Internal]` entries (hidden by default) |
 | `--limit` | Maximum results (default: 20) |
+| `--offset` | Number of results to skip, for pagination (default: 0) |
 
 ### lookup
 
@@ -180,8 +181,25 @@ apple-loc lookup --target "自宅" --lang ja --fuzzy
 | `--fuzzy` | Wrap key/target with `%` wildcards for substring matching |
 | `--internal` | Include `[Internal]` entries (hidden by default) |
 | `--limit` | Maximum results (default: 20) |
+| `--offset` | Number of results to skip, for pagination (default: 0) |
 
 `--framework` searches all originating bundles per source string. For example, "Cancel" exists in AppKit.framework (macOS), UIKit.framework (iOS), Photos.framework etc. — `--framework Photos` finds it. With `--compact` ingest, only the primary (highest-priority) bundle is matched.
+
+### Pagination
+
+`search` and `lookup` support pagination with `--offset` and `--limit`. The JSON output includes `has_more` to indicate whether more results exist.
+
+```bash
+apple-loc search "Cancel" --limit 3 --offset 0   # Page 1
+apple-loc search "Cancel" --limit 3 --offset 3   # Page 2
+```
+
+```json
+{
+  "has_more": true,
+  "results": [...]
+}
+```
 
 ### info
 

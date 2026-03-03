@@ -9,6 +9,11 @@ enum ResultFetcher {
         let distance: Double?
     }
 
+    struct FetchResult {
+        let results: [SearchResult]
+        let hasMore: Bool
+    }
+
     /// Fetch results for a batch of candidates.
     /// Uses two IN queries instead of per-row lookups.
     static func fetch(
@@ -18,10 +23,11 @@ enum ResultFetcher {
         frameworkFilter: String?,
         platformFilter: String?,
         limit: Int,
+        offset: Int = 0,
         deduplicateByTranslation: Bool = false,
         includeInternal: Bool = false
-    ) throws -> [SearchResult] {
-        guard !candidates.isEmpty else { return [] }
+    ) throws -> FetchResult {
+        guard !candidates.isEmpty else { return FetchResult(results: [], hasMore: false) }
 
         let ids = candidates.map(\.sourceId)
         let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
@@ -66,8 +72,10 @@ enum ResultFetcher {
         }
 
         // Assemble results in candidate order (preserves ranking)
+        // Probe pattern: collect limit+1 items after offset to determine hasMore
         var results: [SearchResult] = []
         var seenTranslations: Set<String> = []
+        var validCount = 0
 
         for candidate in candidates {
             guard let ss = sourceMap[candidate.sourceId] else { continue }
@@ -103,7 +111,9 @@ enum ResultFetcher {
                 guard seenTranslations.insert(fingerprint).inserted else { continue }
             }
 
-            if results.count >= limit { break }
+            validCount += 1
+            if validCount <= offset { continue }
+            if results.count >= limit + 1 { break }
 
             let sortedBundles = allBundles?.sorted { a, b in
                 let pa = BundlePriority.from(bundleName: a)
@@ -121,6 +131,8 @@ enum ResultFetcher {
             ))
         }
 
-        return results
+        let hasMore = results.count > limit
+        if hasMore { results.removeLast() }
+        return FetchResult(results: results, hasMore: hasMore)
     }
 }

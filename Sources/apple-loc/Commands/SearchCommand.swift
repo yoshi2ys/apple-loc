@@ -30,6 +30,9 @@ struct SearchCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Maximum number of results.")
     var limit: Int = 20
 
+    @Option(name: .long, help: "Number of results to skip (for pagination).")
+    var offset: Int = 0
+
     @Option(name: .long, help: "SQLite database path.")
     var db: String = DatabaseManager.defaultDBPath
 
@@ -40,7 +43,8 @@ struct SearchCommand: AsyncParsableCommand {
         let fw = framework
         let plat = platform
         let maxResults = limit
-        let overFetchLimit = (fw != nil || plat != nil) ? maxResults * 5 : maxResults
+        let totalNeeded = offset + maxResults
+        let overFetchLimit = (fw != nil || plat != nil) ? offset + maxResults * 5 : totalNeeded
 
         // Detect query language
         let recognizer = NLLanguageRecognizer()
@@ -167,7 +171,7 @@ struct SearchCommand: AsyncParsableCommand {
         // --- Fetch full results ---
         let candidates = sortedIds.map { ResultFetcher.Candidate(sourceId: $0.0, distance: $0.1) }
         let incInternal = includeInternal
-        let results: [SearchResult] = try await dbQueue.read { db in
+        let fetchResult: ResultFetcher.FetchResult = try await dbQueue.read { db in
             try ResultFetcher.fetch(
                 candidates: candidates,
                 in: db,
@@ -175,19 +179,20 @@ struct SearchCommand: AsyncParsableCommand {
                 frameworkFilter: fw,
                 platformFilter: plat,
                 limit: maxResults,
+                offset: offset,
                 deduplicateByTranslation: true,
                 includeInternal: incInternal
             )
         }
 
-        let sorted = results.sorted { a, b in
+        let sorted = fetchResult.results.sorted { a, b in
             let da = a.distance ?? Double.greatestFiniteMagnitude
             let db = b.distance ?? Double.greatestFiniteMagnitude
             if da != db { return da < db }
             return BundlePriority.from(bundleName: a.bundleName)
                 < BundlePriority.from(bundleName: b.bundleName)
         }
-        try ResultsOutput(results: sorted).printJSON()
+        try ResultsOutput(results: sorted, hasMore: fetchResult.hasMore).printJSON()
     }
 
 }
