@@ -105,7 +105,11 @@ enum ResultFetcher {
 
             if results.count >= limit { break }
 
-            let sortedBundles = allBundles?.sorted()
+            let sortedBundles = allBundles?.sorted { a, b in
+                let pa = BundlePriority.from(bundleName: a)
+                let pb = BundlePriority.from(bundleName: b)
+                return pa != pb ? pa < pb : a < b
+            }
             results.append(SearchResult(
                 source: source,
                 bundleName: bundleName,

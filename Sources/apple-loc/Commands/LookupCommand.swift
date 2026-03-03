@@ -71,7 +71,12 @@ struct LookupCommand: AsyncParsableCommand {
             )
         }
 
-        try ResultsOutput(results: results).printJSON()
+        let sorted = results.sorted { a, b in
+            let pa = BundlePriority.from(bundleName: a.bundleName)
+            let pb = BundlePriority.from(bundleName: b.bundleName)
+            return pa != pb ? pa < pb : a.source < b.source
+        }
+        try ResultsOutput(results: sorted).printJSON()
     }
 
     // MARK: - Private

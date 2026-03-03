@@ -12,13 +12,13 @@ swift build -c release
 mkdir -p ~/.local/bin
 ln -sf "$(swift build -c release --show-bin-path)/apple-loc" ~/.local/bin/apple-loc
 
-# Download localization data (~28 GB)
+# Download localization data (~30 GB)
 git clone https://github.com/kishikawakatsumi/applelocalization-tools.git
 
 apple-loc ingest --data-dir ./applelocalization-tools --platform macos26,ios26
 ```
 
-> **Note:** Embedding computation takes time. Use `--embed none` for a faster ingest without semantic search, or limit languages with `--embed en` to reduce the scope.
+> **Note:** Embedding computation takes time. Use `--embed none` for a faster ingest without semantic search, or limit languages with `--embed en` to reduce the scope. You can also use `--embed-tier 1` to limit embedding to system UI frameworks.
 
 ## Usage
 
@@ -38,6 +38,9 @@ apple-loc ingest --data-dir ./applelocalization-tools --platform macos26,ios26
 
 # Re-ingest with different settings
 apple-loc ingest --data-dir ./applelocalization-tools --platform ios26 --embed en,ja --force
+
+# Append new platform data to existing database
+apple-loc ingest --data-dir ./applelocalization-tools --platform macos26 --append
 ```
 
 **Options:**
@@ -48,9 +51,11 @@ apple-loc ingest --data-dir ./applelocalization-tools --platform ios26 --embed e
 | `--platform` | Platform filter, e.g. `ios26`, `macos26` (default: all) |
 | `--langs` | Language codes to import, e.g. `en,ja,fr` (default: all) |
 | `--embed` | Languages for semantic search: `en` (default), `ja,en`, or `none` |
+| `--embed-tier` | Embedding tier: `1`, `2` (default), `3`, or `all` (see below) |
 | `--concurrency` | Parallel embedding workers per language (default: CPU cores / 2) |
 | `--compact` | Skip `source_bundles` table (saves space, `--framework` matches primary bundle only) |
 | `--force` | Overwrite existing database |
+| `--append` | Append to existing database (exclusive with `--force`) |
 
 **`--embed`** controls which languages get semantic search. Languages not included still work with `lookup` and text matching in `search`.
 
@@ -60,6 +65,15 @@ apple-loc ingest --data-dir ./applelocalization-tools --platform ios26 --embed e
 | `ja,en` etc. | Semantic search in the specified languages |
 | `none` | Skip embedding — faster ingest, text matching only |
 
+**`--embed-tier`** controls the scope of bundles to embed. Higher tiers cover more bundles but take longer to compute.
+
+| Tier | Scope | Examples |
+|---|---|---|
+| `1` | System UI frameworks | Foundation, UIKit, SwiftUI, AppKit, CloudKit, StoreKit |
+| `2` (default) | + Built-in apps | Photos, Calendar, Safari, Maps, Mail, Health, Weather |
+| `3` | + Utilities & settings | Terminal, Disk Utility, GameCenter, Settings panels |
+| `all` | All bundles | Everything in the dataset |
+
 Language variants like `es_419`, `fr_CA`, `zh_HK` are supported — embedding automatically falls back to the base language model (`es`, `fr`, `zh-Hant`).
 
 **`--concurrency`** sets the number of parallel workers per language. Total workers (concurrency × number of embed languages) must not exceed CPU core count.
@@ -68,6 +82,31 @@ Language variants like `es_419`, `fr_CA`, `zh_HK` are supported — embedding au
 # 8 workers × 2 languages = 16 total (OK on 16-core machine)
 apple-loc ingest --data-dir ./applelocalization-tools --embed en,ja --concurrency 8 --force
 ```
+
+### embed
+
+Generate embeddings for existing translations in the database. Use this to add semantic search for additional languages after ingest.
+
+```bash
+# Add Japanese embeddings to an existing database
+apple-loc embed --langs ja
+
+# Add multiple languages
+apple-loc embed --langs ja,ko,zh_Hans
+
+# Regenerate with a different tier
+apple-loc embed --langs en --embed-tier 3 --force
+```
+
+**Options:**
+
+| Option | Description |
+|---|---|
+| `--langs` | Comma-separated language codes to embed (required) |
+| `--embed-tier` | Embedding tier: `1`, `2` (default), `3`, or `all` |
+| `--concurrency` | Parallel embedding workers per language (default: CPU cores / 2) |
+| `--batch-size` | Batch size for embedding (default: 1000) |
+| `--force` | Delete existing embeddings for the specified languages and regenerate |
 
 ### search
 
@@ -86,6 +125,9 @@ apple-loc search "設定" --query-lang ja --lang ja
 
 # Filter by framework
 apple-loc search "camera" --lang ja --framework UIKit
+
+# Include internal entries (hidden by default)
+apple-loc search "debug" --internal
 ```
 
 **Options:**
@@ -96,6 +138,7 @@ apple-loc search "camera" --lang ja --framework UIKit
 | `--framework` | Filter by framework/bundle name (substring match, case-insensitive) |
 | `--platform` | Filter by platform, e.g. `ios26` |
 | `--query-lang` | Query language override for text search (default: auto-detect) |
+| `--internal` | Include `[Internal]` entries (hidden by default) |
 | `--limit` | Maximum results (default: 5) |
 
 ### lookup
@@ -135,9 +178,31 @@ apple-loc lookup --target "自宅" --lang ja --fuzzy
 | `--framework` | Filter by framework/bundle name (substring match, case-insensitive) |
 | `--platform` | Filter by platform, e.g. `ios26` |
 | `--fuzzy` | Wrap key/target with `%` wildcards for substring matching |
+| `--internal` | Include `[Internal]` entries (hidden by default) |
 | `--limit` | Maximum results (default: 20) |
 
 `--framework` searches all originating bundles per source string. For example, "Cancel" exists in AppKit.framework (macOS), UIKit.framework (iOS), Photos.framework etc. — `--framework Photos` finds it. With `--compact` ingest, only the primary (highest-priority) bundle is matched.
+
+### info
+
+Show database metadata as JSON.
+
+```bash
+apple-loc info
+```
+
+```json
+{
+  "counts": {
+    "source_strings": 182934,
+    "translations": 7132026,
+    "vectors": 94120
+  },
+  "embedding_languages": ["en"],
+  "languages": ["ar", "ca", "cs", "da", "de", "el", "en", "en_AU", "en_GB", "..."],
+  "platforms": ["macos26", "ios26"]
+}
+```
 
 See `apple-loc <command> --help` for all options.
 

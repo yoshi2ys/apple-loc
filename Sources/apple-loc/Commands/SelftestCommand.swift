@@ -27,6 +27,7 @@ struct SelftestCommand: AsyncParsableCommand {
         try testPlatformConversion()
         try testStructuredTargetResolution()
         try testStructuredTargetOutput()
+        try testEmbedTierClassifier()
         print("All selftests PASSED")
     }
 
@@ -42,7 +43,7 @@ struct SelftestCommand: AsyncParsableCommand {
             // Insert a source_string (source+platform unique, bundle_priority)
             try db.execute(
                 sql: "INSERT INTO source_strings(group_id, source, bundle_name, bundle_priority, file_name, platform) VALUES (?,?,?,?,?,?)",
-                arguments: [1, "Camera", "UIKit.framework", BundlePriority.coreFramework.rawValue, "Localizable.strings", "ios26"]
+                arguments: [1, "Camera", "UIKit.framework", BundlePriority.tier1.rawValue, "Localizable.strings", "ios26"]
             )
             let sourceId = db.lastInsertedRowID
 
@@ -213,20 +214,27 @@ struct SelftestCommand: AsyncParsableCommand {
     }
 
     private func testDedupPriority() throws {
-        // Test BundlePriority classification
-        assert(BundlePriority.from(bundleName: "UIKit.framework") == .coreFramework)
-        assert(BundlePriority.from(bundleName: "Foundation") == .coreFramework)
-        assert(BundlePriority.from(bundleName: "SwiftUI") == .coreFramework)
-        assert(BundlePriority.from(bundleName: "Photos.framework") == .framework)
-        assert(BundlePriority.from(bundleName: "Safari.app") == .app)
+        // Test BundlePriority classification (now delegates to EmbedTierClassifier)
+        assert(BundlePriority.from(bundleName: "UIKitCore.framework") == .tier1)
+        assert(BundlePriority.from(bundleName: "Foundation.framework") == .tier1)
+        assert(BundlePriority.from(bundleName: "SwiftUI.framework") == .tier1)
+        assert(BundlePriority.from(bundleName: "Photos.app") == .tier2)
+        assert(BundlePriority.from(bundleName: "Safari.app") == .tier2)
+        assert(BundlePriority.from(bundleName: "Terminal.app") == .tier3)
+        assert(BundlePriority.from(bundleName: "RandomThing.framework") == .framework)
+        assert(BundlePriority.from(bundleName: "RandomThing.app") == .app)
         assert(BundlePriority.from(bundleName: "Share.appex") == .plugin)
         assert(BundlePriority.from(bundleName: "SomeThing") == .other)
+        assert(BundlePriority.from(bundleName: "ImageIO.framework") == .excluded)
 
         // Test ordering (lower rawValue = higher priority)
-        assert(BundlePriority.coreFramework < .framework)
+        assert(BundlePriority.tier1 < .tier2)
+        assert(BundlePriority.tier2 < .tier3)
+        assert(BundlePriority.tier3 < .framework)
         assert(BundlePriority.framework < .app)
         assert(BundlePriority.app < .plugin)
         assert(BundlePriority.plugin < .other)
+        assert(BundlePriority.other < .excluded)
 
         print("[PASS] Bundle priority deduplication")
     }
@@ -316,7 +324,7 @@ struct SelftestCommand: AsyncParsableCommand {
             // Insert a source string with primary bundle UIKit
             try db.execute(
                 sql: "INSERT INTO source_strings(source, bundle_name, bundle_priority, file_name, platform) VALUES (?,?,?,?,?)",
-                arguments: ["Cancel", "UIKit.framework", BundlePriority.coreFramework.rawValue, "L.strings", "ios26"]
+                arguments: ["Cancel", "UIKit.framework", BundlePriority.tier1.rawValue, "L.strings", "ios26"]
             )
             let sourceId = db.lastInsertedRowID
 
@@ -476,7 +484,7 @@ struct SelftestCommand: AsyncParsableCommand {
         try dbQueue.writeWithoutTransaction { db in
             try db.execute(
                 sql: "INSERT INTO source_strings(source, bundle_name, bundle_priority, file_name, platform) VALUES (?,?,?,?,?)",
-                arguments: ["Camera", "UIKit.framework", BundlePriority.coreFramework.rawValue, "L.strings", "ios26"]
+                arguments: ["Camera", "UIKit.framework", BundlePriority.tier1.rawValue, "L.strings", "ios26"]
             )
             let sourceId = db.lastInsertedRowID
 
@@ -496,7 +504,7 @@ struct SelftestCommand: AsyncParsableCommand {
                     bundle_name = excluded.bundle_name,
                     bundle_priority = excluded.bundle_priority
                 WHERE excluded.bundle_priority < source_strings.bundle_priority
-            """, arguments: ["Camera", "UIKit.framework", BundlePriority.coreFramework.rawValue, "L.strings", "ios26"])
+            """, arguments: ["Camera", "UIKit.framework", BundlePriority.tier1.rawValue, "L.strings", "ios26"])
 
             let row = try Row.fetchOne(db, sql:
                 "SELECT id FROM source_strings WHERE source = ? AND platform = ?",
@@ -908,5 +916,45 @@ struct SelftestCommand: AsyncParsableCommand {
         assert(!jsonString.contains("\\\"NSStringDeviceSpecificRuleType"), "FAIL: structured target should not be escaped")
 
         print("[PASS] Structured target output")
+    }
+
+    private func testEmbedTierClassifier() throws {
+        // classify()
+        assert(EmbedTierClassifier.classify("UIKitCore.framework") == 1, "FAIL: UIKitCore should be tier 1")
+        assert(EmbedTierClassifier.classify("Photos.app") == 2, "FAIL: Photos.app should be tier 2")
+        assert(EmbedTierClassifier.classify("Terminal.app") == 3, "FAIL: Terminal.app should be tier 3")
+        assert(EmbedTierClassifier.classify("ImageIO.framework") == nil, "FAIL: ImageIO should be nil (excluded)")
+        assert(EmbedTierClassifier.classify("RandomThing.framework") == nil, "FAIL: unknown bundle should be nil")
+
+        // shouldEmbed(.upTo(1))
+        assert(EmbedTierClassifier.shouldEmbed("UIKitCore.framework", tier: .upTo(1)) == true, "FAIL: T1 should embed at tier 1")
+        assert(EmbedTierClassifier.shouldEmbed("Photos.app", tier: .upTo(1)) == false, "FAIL: T2 should not embed at tier 1")
+        assert(EmbedTierClassifier.shouldEmbed("Terminal.app", tier: .upTo(1)) == false, "FAIL: T3 should not embed at tier 1")
+        assert(EmbedTierClassifier.shouldEmbed("ImageIO.framework", tier: .upTo(1)) == false, "FAIL: excluded should not embed")
+        assert(EmbedTierClassifier.shouldEmbed("RandomThing.framework", tier: .upTo(1)) == false, "FAIL: unknown should not embed at tier 1")
+
+        // shouldEmbed(.upTo(2))
+        assert(EmbedTierClassifier.shouldEmbed("UIKitCore.framework", tier: .upTo(2)) == true, "FAIL: T1 should embed at tier 2")
+        assert(EmbedTierClassifier.shouldEmbed("Photos.app", tier: .upTo(2)) == true, "FAIL: T2 should embed at tier 2")
+        assert(EmbedTierClassifier.shouldEmbed("Terminal.app", tier: .upTo(2)) == false, "FAIL: T3 should not embed at tier 2")
+
+        // shouldEmbed(.upTo(3))
+        assert(EmbedTierClassifier.shouldEmbed("UIKitCore.framework", tier: .upTo(3)) == true, "FAIL: T1 should embed at tier 3")
+        assert(EmbedTierClassifier.shouldEmbed("Photos.app", tier: .upTo(3)) == true, "FAIL: T2 should embed at tier 3")
+        assert(EmbedTierClassifier.shouldEmbed("Terminal.app", tier: .upTo(3)) == true, "FAIL: T3 should embed at tier 3")
+
+        // shouldEmbed(.all)
+        assert(EmbedTierClassifier.shouldEmbed("UIKitCore.framework", tier: .all) == true, "FAIL: T1 should embed at all")
+        assert(EmbedTierClassifier.shouldEmbed("Photos.app", tier: .all) == true, "FAIL: T2 should embed at all")
+        assert(EmbedTierClassifier.shouldEmbed("Terminal.app", tier: .all) == true, "FAIL: T3 should embed at all")
+        assert(EmbedTierClassifier.shouldEmbed("ImageIO.framework", tier: .all) == false, "FAIL: excluded should not embed even at all")
+        assert(EmbedTierClassifier.shouldEmbed("RandomThing.framework", tier: .all) == true, "FAIL: unknown should embed at all")
+
+        // isExcluded()
+        assert(EmbedTierClassifier.isExcluded("ImageIO.framework") == true, "FAIL: ImageIO should be excluded")
+        assert(EmbedTierClassifier.isExcluded("UIKitCore.framework") == false, "FAIL: UIKitCore should not be excluded")
+        assert(EmbedTierClassifier.isExcluded("RandomThing.framework") == false, "FAIL: unknown should not be excluded")
+
+        print("[PASS] Embed tier classifier")
     }
 }
