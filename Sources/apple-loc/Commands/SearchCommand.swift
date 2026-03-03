@@ -28,7 +28,7 @@ struct SearchCommand: AsyncParsableCommand {
     var includeInternal: Bool = false
 
     @Option(name: .long, help: "Maximum number of results.")
-    var limit: Int = 5
+    var limit: Int = 20
 
     @Option(name: .long, help: "SQLite database path.")
     var db: String = DatabaseManager.defaultDBPath

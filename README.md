@@ -139,7 +139,7 @@ apple-loc search "debug" --internal
 | `--platform` | Filter by platform, e.g. `ios26` |
 | `--query-lang` | Query language override for text search (default: auto-detect) |
 | `--internal` | Include `[Internal]` entries (hidden by default) |
-| `--limit` | Maximum results (default: 5) |
+| `--limit` | Maximum results (default: 20) |
 
 ### lookup
 
