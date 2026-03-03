@@ -6,7 +6,7 @@ import NaturalLanguage
 struct SearchCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "search",
-        abstract: "Semantic search for related official translations."
+        abstract: "Semantic search for translations."
     )
 
     @Argument(help: "Natural language search query.")
