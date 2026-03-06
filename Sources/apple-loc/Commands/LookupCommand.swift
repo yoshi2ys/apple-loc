@@ -95,7 +95,7 @@ struct LookupCommand: AsyncParsableCommand {
 
     /// Search by source key (exact or LIKE)
     private func lookupByKey(_ key: String, in db: Database) throws -> [LookupResult] {
-        let sqlLimit = offset + limit
+        let sqlLimit = offset + limit + 1
         if fuzzy {
             // Ranked fuzzy: exact(0) > prefix(1) > substring(2)
             var sql = """
@@ -146,7 +146,7 @@ struct LookupCommand: AsyncParsableCommand {
 
     /// Reverse lookup by target text
     private func lookupByTarget(_ target: String, in db: Database) throws -> [LookupResult] {
-        let sqlLimit = offset + limit
+        let sqlLimit = offset + limit + 1
         if fuzzy {
             // Ranked fuzzy: exact(0) > prefix(1) > substring(2)
             var sql = """
